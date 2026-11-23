@@ -89,9 +89,11 @@
             case 0x04: key = 3; break;  // Fast Forward
             case 0x05: key = 2; break;  // Rewind
             case 0x06: key = 4; break;  // Record Strobe
-            // Record Exit(0x07)不是「停止」:它是录音状态的收尾,映射成 STOP 会让
-            // 「按一次 REC」在 DAW 里先录音再停住。这里直接忽略
-            case 0x07: key = 0; break;
+            // Record Exit(0x07) = 退出录音。琴的录音键是开关:
+            // 第一次发 Record Strobe(06 06),再按一次发 Record Exit(06 07)。
+            // Logic 的录音键只进不出(鼠标点也一样停不了),所以第二次按要翻成
+            // STOP 才能「再按一次就停」——这是用户实测后定的行为(0.1.14)
+            case 0x07: key = 5; break;
             default: key = 0; break;
         }
         if (key) _lastMMCTime = CFAbsoluteTimeGetCurrent();
