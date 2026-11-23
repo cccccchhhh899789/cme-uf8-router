@@ -30,6 +30,7 @@
     NSMenuItem *_logItem;
     NSTextView *_logView;
     NSWindow *_logWindow;
+    NSMutableArray<NSString *> *_logLines;   // 日志环形缓冲(最多 500 行)
 }
 
 // core 懒创建:之前 main.m 里从没给 delegate 建过 core,导致菜单永远空
@@ -42,6 +43,27 @@
     self.core.delegate = self;      // 之前漏了这行:MIDI 热插拔/日志回调都不会来
     [self setupStatusBar];
     [self.core start];
+    // 菜单是在 core 启动前建的,那时 useMackieTransport/配置还没恢复,
+    // 勾选态会显示成「没勾」但功能其实在跑 —— 启动完再刷一次以真实状态为准
+    [self rebuildProtoMenu];
+    [self rebuildFilterMenu];
+    [self rebuildTransportMenu];
+}
+
+// 退出前把虚拟口/端口都撤干净,免得系统里留下挂在已经不在的 App 上的 MIDI 端口
+// (不撤的话 Logic 那边会看到一个半死的设备,得等 MIDIServer 超时才收走)
+- (void)applicationWillTerminate:(NSNotification *)notification {
+    printf("[quit] 撤虚拟端口/MCU 端口\n"); fflush(stdout);
+    [self.core stop];
+    fflush(stdout);
+    // MIDIClientDispose 在某些情况下会等 MIDIServer 回话而拖延退出;
+    // 端口已经撤完了,这里直接结束进程,保证「点退出就退出」
+    exit(0);
+}
+
+// 明确允许退出(默认就是 Now,写出来是为了防止哪天加了窗口后逻辑变化)
+- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender {
+    return NSTerminateNow;
 }
 
 - (void)setupStatusBar {
@@ -82,6 +104,11 @@
     NSMenuItem *refresh = [[NSMenuItem alloc] initWithTitle:@"刷新设备" action:@selector(refresh:) keyEquivalent:@"r"];
     refresh.target = self;
     [_menu addItem:refresh];
+
+    NSMenuItem *capture = [[NSMenuItem alloc] initWithTitle:@"抓原始报文(排错用)" action:@selector(toggleCapture:) keyEquivalent:@""];
+    capture.target = self;
+    capture.state = self.core.captureRawEnabled ? NSControlStateValueOn : NSControlStateValueOff;
+    [_menu addItem:capture];
 
     NSMenuItem *log = [[NSMenuItem alloc] initWithTitle:@"查看日志" action:@selector(showLog:) keyEquivalent:@"l"];
     log.target = self;
@@ -244,6 +271,16 @@
     _filterItem.submenu = sub;
 }
 
+// 抓包默认关:它会写盘、也会把弹的东西落成日志。只有排障时才开
+- (void)toggleCapture:(NSMenuItem *)sender {
+    RouterCore *core = self.core;
+    core.captureRawEnabled = !core.captureRawEnabled;
+    sender.state = core.captureRawEnabled ? NSControlStateValueOn : NSControlStateValueOff;
+    [self.core log:core.captureRawEnabled
+        ? @"已开始抓原始报文: ~/Library/Application Support/cme-uf8-router/raw-capture.log"
+        : @"已停止抓原始报文"];
+}
+
 - (void)toggleFilter:(NSMenuItem *)sender {
     NSString *key = sender.representedObject;
     MIDIMapper *mapper = self.core.mapper;   // 别用空 _mapper:菜单动作必须始终有主
@@ -280,6 +317,11 @@
                                                    backing:NSBackingStoreBuffered defer:NO];
         _logWindow.title = @"cme-uf8-router 日志";
         _logWindow.contentView = scroll;
+        if (_logLines.count) {   // 回填窗口打开之前发生的事
+            [_logView.textStorage appendAttributedString:
+                [[NSAttributedString alloc] initWithString:[_logLines componentsJoinedByString:@"\n"]]];
+            [_logView.textStorage appendAttributedString:[[NSAttributedString alloc] initWithString:@"\n"]];
+        }
     }
     [_logWindow makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
@@ -315,6 +357,21 @@ static int validateMenu(NSMenu *menu, NSString *prefix) {
     [d setupStatusBar];
     [d.core start];               // 建虚拟端口 + 枚举真实设备
     [d.core refreshDevices];
+    [d rebuildFilterMenu];
+    [d rebuildTransportMenu];
+    printf("=== 勾选态 ===\n");
+    printf("info useMackieTransport=%s translateMMC=%s\n",
+           d.core.useMackieTransport ? "YES" : "NO",
+           d.core.mapper.translateMMC ? "YES" : "NO");
+    for (NSMenuItem *top in d->_menu.itemArray) {
+        if (!top.submenu) continue;
+        for (NSMenuItem *it in top.submenu.itemArray) {
+            if (it.action == @selector(toggleFilter:) && it.representedObject) {
+                printf("info [%s] %s = %s\n", top.title.UTF8String, [it.representedObject description].UTF8String,
+                       it.state == NSControlStateValueOn ? "勾" : "未勾");
+            }
+        }
+    }
     printf("=== 当前系统 MIDI 设备 ===\n");
     printf("输入源 %lu 个:\n", (unsigned long)d.core.sourceNames.count);
     for (NSString *n in d.core.sourceNames) printf("  - %s\n", n.UTF8String);
@@ -432,14 +489,20 @@ static int validateMenu(NSMenu *menu, NSString *prefix) {
     [self updateStatusRow];
 }
 
+// 日志先写进缓冲(最多 500 行),再刷到窗口。
+// 以前「窗口没开就直接丢弃」,于是最需要看的那几条(启动/端口创建失败)永远看不到
 - (void)router:(id)sender didLog:(NSString *)line {
-    if (_logView) {
-        dispatch_async(dispatch_get_main_queue(), ^{
+    if (!line) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!self->_logLines) self->_logLines = [NSMutableArray array];
+        [self->_logLines addObject:line];
+        while (self->_logLines.count > 500) [self->_logLines removeObjectAtIndex:0];
+        if (self->_logView) {
             NSAttributedString *s = [[NSAttributedString alloc] initWithString:[line stringByAppendingString:@"\n"]];
             [self->_logView.textStorage appendAttributedString:s];
             [self->_logView scrollRangeToVisible:NSMakeRange(self->_logView.string.length, 0)];
-        });
-    }
+        }
+    });
 }
 
 @end

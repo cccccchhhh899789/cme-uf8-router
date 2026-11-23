@@ -106,9 +106,14 @@ static const uint8_t kCINLength[16] = {
         return result;
     }
     // Auto:探测 0x0F 前缀帧;出现即按 CME,否则按标准
+    // 收紧判定:0x0F 后面必须紧跟一个合法的 CME 帧头。
+    // 以前的条件是 (b & 0x0F) == 0x0F —— 通道 16 的 0x9F/0xBF/0xCF 也会命中,
+    // 整包就会被当成变长 CME 帧解析,音符/CC 全乱
     BOOL looksCME = NO;
-    for (NSUInteger i = 0; i + 3 < length; i += 4) {
-        if ((bytes[i] & 0x0F) == 0x0F) { looksCME = YES; break; }
+    for (NSUInteger i = 0; i + 1 < length; i += 4) {
+        if (bytes[i] != 0x0F) continue;
+        uint8_t nx = bytes[i + 1];
+        if (nx == 0xF0 || nx == 0xF2 || nx >= 0xF8) { looksCME = YES; break; }
     }
     if (looksCME) {
         [self parseCMEPackets:bytes length:length into:result];
@@ -126,20 +131,17 @@ static const uint8_t kCINLength[16] = {
     while (i < len) {
         uint8_t b = buf[i++];
         if (b < 0x80) {
-            // 数据字节,无运行状态则丢弃
+            // 数据字节。b 本身就是这条 running-status 消息的第一个数据字节,
+            // 以前的写法去读 buf[i]/buf[i+1],等于把 b 白扔了 → 丢音符、音高错乱
             if (!runningStatus) continue;
-            // 补运行状态消息
             if (runningStatus >= 0xC0 && runningStatus <= 0xDF) {
-                if (i < len) {
-                    NSData *msg = [NSData dataWithBytes:(const uint8_t[]){runningStatus, buf[i]} length:2];
-                    [out addObject:msg];
-                    i++;
-                }
+                // 2 字节消息(Program Change / Channel Pressure):只需要 b
+                [out addObject:[NSData dataWithBytes:(const uint8_t[]){runningStatus, b} length:2]];
             } else if (runningStatus >= 0x80) {
-                if (i + 1 < len) {
-                    NSData *msg = [NSData dataWithBytes:(const uint8_t[]){runningStatus, buf[i], buf[i+1]} length:3];
-                    [out addObject:msg];
-                    i += 2;
+                // 3 字节消息:还差第二个数据字节
+                if (i < len) {
+                    [out addObject:[NSData dataWithBytes:(const uint8_t[]){runningStatus, b, buf[i]} length:3]];
+                    i++;
                 }
             }
             continue;
@@ -150,7 +152,12 @@ static const uint8_t kCINLength[16] = {
             runningStatus = 0;
             continue;
         }
-        if (b == 0xF0 || b == 0xF7) {
+        if (b == 0xF7) {
+            // 孤立的 sysex 结束符(前一段被丢了):忽略,不然会被当成一条空 sysex 转出去
+            runningStatus = 0;
+            continue;
+        }
+        if (b == 0xF0) {
             // SysEx:直到 F7
             NSMutableData *sysex = [NSMutableData dataWithBytes:&b length:1];
             while (i < len) {

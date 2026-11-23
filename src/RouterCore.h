@@ -31,7 +31,11 @@ NS_ASSUME_NONNULL_BEGIN
 // transport 键用 Mackie Control 格式发到 "CME UF8 Router MCU" 口(Logic 当控制表面用)
 // 乐器/音符等仍在普通虚拟输出里,两者互不干扰
 @property(nonatomic, assign) BOOL useMackieTransport;
+// 原始报文抓包(排错用,默认关):默认关是因为它会在 MIDI 实时线程上产生磁盘 IO,
+// 而且会把用户弹的东西持久化下来
+@property(nonatomic, assign) BOOL captureRawEnabled;
 
+- (void)log:(NSString *)line;  // 往日志(状态行/日志窗口)写一行
 - (void)refreshDevices;        // 重新枚举
 - (void)start;                  // 启动监听/路由
 - (void)stop;
@@ -39,6 +43,7 @@ NS_ASSUME_NONNULL_BEGIN
 // 自检(无 GUI):喂一包数据走全链路,打印结果
 + (void)runSelfTest;
 + (void)runRouteSelfTest;
++ (int)runStopSelfTest;
 
 @end
 

@@ -54,12 +54,23 @@ DAW 侧（以 Logic Pro 为例）：
 | 控制表面设定 → 安装 → **Mackie Control** | 输入 + 输出都选 `CME UF8 Router MCU` |
 | 设置 → MIDI → 输入 | **取消勾选** `CME UF8 Router MCU`（否则乐器轨会跟着弹响，见下） |
 
+## 自检
+
+```bash
+bash verify.sh          # 编译 + 6 项自检（协议 / 菜单 / 动作 / 路由 / 退出撤端口 / 单实例）
+bash verify.sh --no-build
+```
+
+0.1.7 做过一轮独立代码审计（32 条）与 CoreMIDI 坑调研，修复清单见
+[docs/fixes-0.1.7.md](docs/fixes-0.1.7.md)，原始报告见 [docs/audit.md](docs/audit.md)、
+[docs/known-pitfalls.md](docs/known-pitfalls.md)。
+
 ## 已知限制（都是硬件/协议层面的，非 bug）
 
 - **最左两个键（`\|<<` 和 `<<`）发的完全一样**：都是 `F2 00 00`。5-pin DIN 上不带按键 ID，电脑侧无法区分；两个都发 MCU REWIND。"回到开头"用 DAW 自己的 Return 键。
   （原厂驱动能分开，是因为它走 UF8 自己的 USB 口 + CME 私有帧，帧里带按键 ID。）
 - **按下走带键会"弹响"乐器**：MCU 按键本身就是 Note On（CH1 的 91–95），乐器轨和控制表面读同一股数据。按上表的「设置 → MIDI → 输入」取消勾选即可。
-- **控制表面显示离线**：App 重启时虚拟端口会重建，DAW 可能把它判成离线，重选一次输入/输出即可（0.1.6 起配置会记住，正常使用不会频繁重建）。
+- **控制表面显示离线**：0.1.7 起三个虚拟端点都使用固定 `kMIDIPropertyUniqueID`，Logic 控制表面不会再因为「重启后换了身份」而掉线；若仍显示离线，通常是 App 正在升级、端口短暂消失，重开一次即可。
 - 仅支持 macOS（10.13+），双架构 `x86_64 + arm64`。
 
 ## 自己编译

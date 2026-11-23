@@ -7,6 +7,23 @@
 #import <Cocoa/Cocoa.h>
 #import "AppDelegate.h"
 #import "RouterCore.h"
+#include <sys/file.h>
+#include <fcntl.h>
+#include <unistd.h>
+
+// 单实例锁:两个实例同时跑会抢同一个虚拟端口名、互相覆盖配置、对 Logic 重复响应。
+// /tmp 下加 flock 即可(不能用 ~/Library,沙箱里跑自检时写不进去)。
+static int gLockFD = -1;
+static BOOL acquireSingleInstanceLock(void) {
+    const char *path = "/tmp/cme-uf8-router.lock";
+    gLockFD = open(path, O_CREAT | O_RDWR, 0644);
+    if (gLockFD < 0) return YES;            // 打不开锁文件就不拦(宁可多跑也不要起不来)
+    if (flock(gLockFD, LOCK_EX | LOCK_NB) != 0) {
+        close(gLockFD); gLockFD = -1;
+        return NO;
+    }
+    return YES;
+}
 
 int main(int argc, const char *argv[]) {
     // 自检模式:不启动 GUI
@@ -46,6 +63,11 @@ int main(int argc, const char *argv[]) {
                 return [AppDelegate runActionSelfTest];
             }
         }
+        if (strcmp(argv[i], "--stop-selftest") == 0) {
+            @autoreleasepool {
+                return [RouterCore runStopSelfTest];
+            }
+        }
         if (strcmp(argv[i], "--quit-selftest") == 0) {
             @autoreleasepool {
                 return [AppDelegate runQuitSelfTest];
@@ -53,6 +75,10 @@ int main(int argc, const char *argv[]) {
         }
     }
     @autoreleasepool {
+        if (!acquireSingleInstanceLock()) {
+            fprintf(stderr, "已经有一个 cme-uf8-router 在跑了(端口名会冲突),本次不启动。\n");
+            return 0;
+        }
         NSApplication *app = [NSApplication sharedApplication];
         AppDelegate *delegate = [[AppDelegate alloc] init];
         app.delegate = delegate;

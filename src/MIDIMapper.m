@@ -53,7 +53,9 @@
             case 0x04: key = 3; break;  // Fast Forward
             case 0x05: key = 2; break;  // Rewind
             case 0x06: key = 4; break;  // Record Strobe
-            case 0x07: key = 5; break;  // Record Exit
+            // Record Exit(0x07)不是「停止」:它是录音状态的收尾,映射成 STOP 会让
+            // 「按一次 REC」在 DAW 里先录音再停住。这里直接忽略
+            case 0x07: key = 0; break;
             default: key = 0; break;
         }
         if (key) _lastMMCTime = CFAbsoluteTimeGetCurrent();
@@ -135,8 +137,11 @@
         if (!_translateMMC || _runtimeMuteCC) return @[msg];   // 不翻译:原样转发 MMC/SPP
         NSInteger cc = [self ccForTransportKey:key];
         if (cc > 0) {
-            uint8_t out[3] = { 0xB0, (uint8_t)cc, 0x7F };
-            return @[[NSData dataWithBytes:out length:3]];
+            // 成对发「按下 127 + 松开 0」:很多 DAW/插件只在值「变化」时触发,
+            // 每次都是 127 等于没变化,第二次按就没反应
+            uint8_t on[3]  = { 0xB0, (uint8_t)cc, 0x7F };
+            uint8_t off[3] = { 0xB0, (uint8_t)cc, 0x00 };
+            return @[[NSData dataWithBytes:on length:3], [NSData dataWithBytes:off length:3]];
         }
         return @[msg];
     }
@@ -167,10 +172,32 @@
 - (NSString *)configPath {
     NSArray *paths = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory,
                                                          NSUserDomainMask, YES);
-    NSString *dir = [paths.firstObject stringByAppendingPathComponent:@"cme-uf8-router"];
+    NSString *base = paths.firstObject;
+    if (!base) return nil;   // 极端情况下没有 Application Support:返回 nil,调用方要判空,
+                             // 否则 writeToFile:nil 会抛 NSInvalidArgumentException(直接崩)
+    NSString *dir = [base stringByAppendingPathComponent:@"cme-uf8-router"];
+    if (!dir) return nil;
     NSFileManager *fm = [NSFileManager defaultManager];
-    if (![fm fileExistsAtPath:dir]) [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:NULL];
+    if (![fm fileExistsAtPath:dir]) {
+        [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:NULL];
+    }
     return [dir stringByAppendingPathComponent:@"midi-map.plist"];
+}
+
+// 只在真的变了才写盘:refreshDevices 会被热插拔频繁触发,每次都写文件既慢又会和
+// 另一个实例互相覆盖
+- (void)setLastSourceIfNeeded:(NSString *)name {
+    if (!name) return;
+    if ([_lastSource isEqualToString:name]) return;
+    _lastSource = [name copy];
+    [self saveConfig];
+}
+
+- (void)setLastDestIfNeeded:(NSString *)name {
+    if (!name) return;
+    if ([_lastDest isEqualToString:name]) return;
+    _lastDest = [name copy];
+    [self saveConfig];
 }
 
 - (void)loadConfig {
@@ -179,6 +206,10 @@
     if (![d[@"configVersion"] isEqual:@(1)]) {
         // 0.1.4 及更早版本的 plist 里,translateMMC 会被 MCU 模式连带写成 NO,
         // 那不是用户的选择 —— 见到没有版本号的老文件就恢复默认(翻译开),再按新格式存一遍。
+        // 但输入/输出记忆要照常读回来,否则升级后第一次启动会「忘记上次选的设备」
+        if ([d[@"lastSource"] isKindOfClass:[NSString class]]) _lastSource = d[@"lastSource"];
+        if ([d[@"lastDest"] isKindOfClass:[NSString class]])   _lastDest   = d[@"lastDest"];
+        if (d[@"useMackie"]) _useMackie = [d[@"useMackie"] boolValue];
         _translateMMC = YES;
         [self saveConfig];
         return;
@@ -216,7 +247,13 @@
     NSMutableDictionary *map = [NSMutableDictionary dictionary];
     for (NSNumber *k in _transportMap) map[k.stringValue] = _transportMap[k];
     d[@"transportMap"] = map;
-    [d writeToFile:self.configPath atomically:YES];
+    NSString *path = self.configPath;
+    if (!path) { NSLog(@"[cme-uf8-router] 没有配置目录,设置无法保存"); return; }
+    NSError *err = nil;
+    if (![d writeToFile:path atomically:YES]) { }   // 占位,下面统一报错
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+        NSLog(@"[cme-uf8-router] 配置保存失败: %@", err.localizedDescription ?: @"(未知原因)");
+    }
 }
 
 @end
