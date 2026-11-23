@@ -6,7 +6,7 @@
 
 set -e
 cd "$(dirname "$0")"
-VERSION="0.1.10"
+VERSION="0.1.11"
 
 echo "==> 1/4 编译"
 bash build.sh > /tmp/build.log 2>&1 || { echo "编译失败,见 /tmp/build.log"; exit 1; }

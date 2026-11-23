@@ -28,6 +28,7 @@
 // Mackie Control 输出:transport 事件 -> MCU 按键(Note On ch1)
 // 返回 @[按下(vel 0x7F), 松开(vel 0x00)],非 transport 消息返回 @[]
 - (NSArray<NSData *> *)mcuMessagesFor:(NSData *)msg;
+- (NSArray<NSData *> *)mcuMessagesForKey:(NSInteger)key;
 // transport 归一化:1=RTZ 2=REW 3=FF 4=REC 5=STOP 6=PLAY,不是 transport 返回 0
 - (NSInteger)transportKeyForMessage:(NSData *)msg;
 - (void)setLastSourceIfNeeded:(NSString *)name;   // 只在变化时写盘,避免每包都写

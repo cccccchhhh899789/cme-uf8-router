@@ -25,9 +25,25 @@ static BOOL acquireSingleInstanceLock(void) {
     return YES;
 }
 
+static BOOL needsMIDIPorts(const char *arg) {
+    // 这些模式会创建虚拟端口(和正式 App 抢同名端口/抢 uniqueID),
+    // 一旦和正在跑的 App 并存,Logic 的控制表面就会整片失灵。
+    return strcmp(arg, "--route-selftest") == 0 ||
+           strcmp(arg, "--menu-selftest") == 0 ||
+           strcmp(arg, "--action-selftest") == 0 ||
+           strcmp(arg, "--stop-selftest") == 0 ||
+           strcmp(arg, "--quit-selftest") == 0;
+}
+
 int main(int argc, const char *argv[]) {
     // 自检模式:不启动 GUI
     for (int i = 1; i < argc; i++) {
+        // 先抢锁:正在跑的 App 会让自检创建出第二个同名端口,之后 Logic 里
+        // 所有走带键都会失灵(踩过:自检跑完 App 还活着,但端口已经不是 Logic 连的那个了)
+        if (needsMIDIPorts(argv[i]) && !acquireSingleInstanceLock()) {
+            fprintf(stderr, "已经有一个 cme-uf8-router 在跑,先退掉它再跑这个自检(否则会抢端口)。\n");
+            return 0;
+        }
         if (strcmp(argv[i], "--reset-config") == 0) {
             // 把配置文件恢复默认(过滤器全关、MMC→CC 翻译开)
             NSString *dir = [@"~/Library/Application Support/cme-uf8-router" stringByExpandingTildeInPath];

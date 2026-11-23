@@ -71,8 +71,11 @@
         BOOL justAfterMMC = (CFAbsoluteTimeGetCurrent() - _lastMMCTime < 0.15);
         if (justAfterMMC && v == _lastSPP) { key = 0; }     // MMC 后附带的当前位置报告
         else if (v == 0) key = 1;                          // RTZ(琴在 0 位时 RTZ 和 REW 发的都是 F2 00 00)
-        else if (_lastSPP >= 0 && v > _lastSPP) key = 3;   // FF
-        else if (_lastSPP >= 0 && v < _lastSPP) key = 2;   // REW
+        // 第一次收到 SPP 时不知道基准位置:位置非 0 就当「往后」,
+        // 否则 App 刚启动那一下按 >> 什么都不会发生(踩过)。
+        else if (_lastSPP < 0) key = 3;
+        else if (v > _lastSPP) key = 3;                    // FF
+        else if (v < _lastSPP) key = 2;                    // REW
         _lastSPP = v;
         return key;
     }
@@ -98,9 +101,7 @@
 }
 
 // Mackie Control:transport 事件 -> MCU 按键(Note On CH1,按下 0x7F / 松开 0x00)
-- (NSArray<NSData *> *)mcuMessagesFor:(NSData *)msg {
-    NSInteger key = [self transportKeyForMessage:msg];
-    if (key <= 0) return @[];
+- (NSArray<NSData *> *)mcuMessagesForKey:(NSInteger)key {
     uint8_t note = 0;
     switch (key) {
         case 1: note = 0x5B; break; // RTZ -> 也用 REWIND(MCU 没有「回到起点」键,F1 在 Logic 里默认没绑定)
@@ -114,6 +115,13 @@
     uint8_t on[3]  = { 0x90, note, 0x7F };
     uint8_t off[3] = { 0x90, note, 0x00 };
     return @[[NSData dataWithBytes:on length:3], [NSData dataWithBytes:off length:3]];
+}
+
+- (NSArray<NSData *> *)mcuMessagesFor:(NSData *)msg {
+    // 注意:transportKeyForMessage: 会更新 _lastSPP/_lastMMCTime。
+    // 调用方若已经算过 key,必须用 mcuMessagesForKey:,否则第二次调用会
+    // 因为 _lastSPP 已被更新而算成 key=0(SPP 方向判断直接失效)。
+    return [self mcuMessagesForKey:[self transportKeyForMessage:msg]];
 }
 
 - (NSArray<NSData *> *)processMessage:(NSData *)msg {

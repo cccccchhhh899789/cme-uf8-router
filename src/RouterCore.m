@@ -470,7 +470,7 @@ static void midiReadProc(const MIDIPacketList *pktlist, void *readProcRefCon, vo
                 NSInteger key = [_mapper transportKeyForMessage:m];
                 if (key > 0) {
                     if ([self mcuEventShouldEmitKey:key]) {
-                        NSArray<NSData *> *mcu = [_mapper mcuMessagesFor:m];
+                        NSArray<NSData *> *mcu = [_mapper mcuMessagesForKey:key];
                         if (mcu.count >= 2) {
                             // 按下立刻发,松开故意晚 80ms:
                             // 1) 同一时刻的 note-on/note-off 有些 DAW 会当成抖动丢掉 off,
@@ -673,6 +673,11 @@ static void routeProbeProc(const MIDIPacketList *pktlist, void *refCon, void *co
 
     RouterCore *core = [[RouterCore alloc] init];
     [core start];                      // 会 refreshDevices
+    // 自检必须可重复:用户配置里可能正开着 MCU、或关着 MMC→CC 翻译。
+    // 先压成固定基线(MCU 关、翻译开),需要的测试再自己打开。
+    core->_useMackieTransport = NO;
+    core.mapper.translateMMC = YES;
+    core.mapper.runtimeMuteCC = NO;
     NSString *srcName = nil, *dstName = nil;
     for (NSString *n in core.sourceNames) if ([n hasPrefix:@"CME-Test-Src"]) srcName = n;
     for (NSString *n in core.destNames) if ([n hasPrefix:@"CME-Test-Dst"]) dstName = n;
@@ -810,6 +815,29 @@ static void routeProbeProc(const MIDIPacketList *pktlist, void *refCon, void *co
             } else {
                 printf("MCU 2 秒内未收到 => FAIL\n");
             }
+
+            // 4d: SPP 路径(琴的 |<< 和 >> 只发 SPP,不发 MMC) —— 这条最容易悄悄坏掉
+            usleep(300000);                  // 让「MMC 后 150ms 内吞 SPP」的窗口过期
+            probe.got = 0;
+            Byte sppFF[] = { 0xF2, 0x10, 0x00 };   // SPP=16,位置往后 => FF
+            MIDIPacketList pls1; MIDIPacket *pks1 = MIDIPacketListInit(&pls1);
+            MIDIPacketListAdd(&pls1, sizeof(pls1), pks1, 0, 3, sppFF);
+            MIDIReceived(testSrc, &pls1);
+            for (int i = 0; i < 200 && !probe.got; i++) usleep(10000);
+            if (!probe.got) printf("MCU:SPP 16(>>) → 2 秒内没收到 => FAIL\n");
+            else printf("MCU:SPP 16(>>) → 收到: %02x %02x %02x => %s\n", probe.bytes[0], probe.bytes[1], probe.bytes[2],
+                   (probe.bytes[1] == 0x5C) ? "PASS(MCU FAST FWD 键)" : "内容不符 FAIL");
+
+            usleep(300000);
+            probe.got = 0;
+            Byte sppZero[] = { 0xF2, 0x00, 0x00 }; // SPP=0 => RTZ/REW
+            MIDIPacketList pls2; MIDIPacket *pks2 = MIDIPacketListInit(&pls2);
+            MIDIPacketListAdd(&pls2, sizeof(pls2), pks2, 0, 3, sppZero);
+            MIDIReceived(testSrc, &pls2);
+            for (int i = 0; i < 200 && !probe.got; i++) usleep(10000);
+            if (!probe.got) printf("MCU:SPP 0(|<<) → 2 秒内没收到 => FAIL\n");
+            else printf("MCU:SPP 0(|<<) → 收到: %02x %02x %02x => %s\n", probe.bytes[0], probe.bytes[1], probe.bytes[2],
+                   (probe.bytes[1] == 0x5B) ? "PASS(MCU REWIND 键)" : "内容不符 FAIL");
 
             // 4b: 同一时刻弹奏的音符必须仍然从虚拟输出进 DAW
             if (vSrc) {
