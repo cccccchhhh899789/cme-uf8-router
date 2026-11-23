@@ -2,6 +2,7 @@
 //
 // 用法:
 //   cme-uf8-router --selftest    # 无 GUI,跑协议自检后退出
+//   cme-uf8-router --usb-selftest # 直读琴的 USB 口 3 秒,验证 USB 通路
 //   cme-uf8-router               # 启动菜单栏 App
 
 #import <Cocoa/Cocoa.h>
@@ -53,8 +54,10 @@ int main(int argc, const char *argv[]) {
             MIDIMapper *m = [[MIDIMapper alloc] init];
             [m saveConfig];
             printf("已重置配置: %s\n", plist.UTF8String);
-            printf("  filterCC1=%d filterCC7=%d filterClock=%d filterSensing=%d translateMMC=%d\n",
-                   m.filterCC1, m.filterCC7, m.filterClock, m.filterSensing, m.translateMMC);
+            printf("  allowNotes=%d allowPitch=%d allowCC=%d allowSysEx=%d allowClock=%d allowSensing=%d\n",
+                   m.allowNotes, m.allowPitch, m.allowCC, m.allowSysEx, m.allowClock, m.allowSensing);
+            printf("  allowCC1=%d allowCC2=%d allowCC7=%d allowCC64=%d useUSB=%d useMackie=%d\n",
+                   m.allowCC1, m.allowCC2, m.allowCC7, m.allowCC64, m.useUSB, m.useMackie);
             return 0;
         }
         if (strcmp(argv[i], "--selftest") == 0) {
@@ -77,6 +80,12 @@ int main(int argc, const char *argv[]) {
         if (strcmp(argv[i], "--action-selftest") == 0) {
             @autoreleasepool {
                 return [AppDelegate runActionSelfTest];
+            }
+        }
+        if (strcmp(argv[i], "--usb-selftest") == 0) {
+            // 只读 USB,不建虚拟端口,所以不需要抢锁
+            @autoreleasepool {
+                return [RouterCore runUSBSelfTest];
             }
         }
         if (strcmp(argv[i], "--stop-selftest") == 0) {

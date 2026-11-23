@@ -28,6 +28,10 @@ NS_ASSUME_NONNULL_BEGIN
 // 选择(存名字,枚举时匹配)
 @property(nonatomic, copy, nullable) NSString *selectedSourceName;
 @property(nonatomic, copy, nullable) NSString *selectedDestName;
+// 输入方式:NO = 从 CoreMIDI 源读(默认,如 U2MIDI Pro);YES = 直读琴的 USB 口
+// (琴的 USB 口是假 CDC,macOS 不认 → 只能自己读,详见 USBReader.h)
+@property(nonatomic, assign) BOOL usbInput;
+@property(nonatomic, copy, readonly, nullable) NSString *lastUSBError;   // 上次 USB 失败原因(成功则 nil)
 // transport 键用 Mackie Control 格式发到 "CME UF8 Router MCU" 口(Logic 当控制表面用)
 // 乐器/音符等仍在普通虚拟输出里,两者互不干扰
 @property(nonatomic, assign) BOOL useMackieTransport;
@@ -44,6 +48,7 @@ NS_ASSUME_NONNULL_BEGIN
 + (void)runSelfTest;
 + (void)runRouteSelfTest;
 + (int)runStopSelfTest;
++ (int)runUSBSelfTest;   // 直读 USB 3 秒,统计收到的包(需插着琴)
 
 @end
 

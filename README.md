@@ -21,6 +21,7 @@ UF8 ──5-pin DIN──> USB-MIDI 接口 ──> cme-uf8-router ──┬─�
 
 - 菜单栏常驻（无 Dock 图标），按需创建虚拟 MIDI 端口
 - 三档协议解码：标准 USB-MIDI / CME 私有帧（0x0F 前置）/ 自动识别
+- 两种输入方式（菜单可切）：经 USB-MIDI 接口进来，或**直读琴的 USB 口**（0.1.13，省掉转接头）
 - 走带键翻译：MMC、SPP、实时消息 → 可选 **Mackie Control** 或原厂 CC114–119
 - 跨包 SysEx 拼装（不少 USB-MIDI 接口会把一条 MMC 拆成两包）
 - 过滤器：CC#1 调制轮、CC#7 音量、时钟、Active Sensing 可单独丢弃
@@ -42,7 +43,7 @@ App 菜单（点击菜单栏图标）：
 
 | 菜单项 | 选什么 |
 |---|---|
-| 输入源 | 你的 USB-MIDI 接口（如 `Port 1 — U2MIDI Pro`） |
+| 输入源 | 你的 USB-MIDI 接口（如 `Port 1 — U2MIDI Pro`），或「用 USB 直连琴」 |
 | 输出目标 | `CME UF8 Router (虚拟输出 → 给 DAW 用)` |
 | transport 键 | 勾选「用 Mackie Control 发 transport」 |
 

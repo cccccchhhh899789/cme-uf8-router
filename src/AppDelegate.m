@@ -7,7 +7,7 @@
 //   输出目标 > (子菜单,单选,列出所有系统 MIDI 目标)
 //   协议模式 > 自动识别 / CME-USB / 标准流
 //   ——
-//   过滤器 > CC#1 调制轮 / CC#7 音量 / 时钟 / ActiveSensing(可勾选)
+//   放行(白名单) > 键盘音符 / 弯音 / CC / sysex / 时钟 / ActiveSensing(勾选 = 放行)
 //   ——
 //   刷新设备
 //   查看日志(面板)
@@ -15,6 +15,7 @@
 
 #import "AppDelegate.h"
 #import "CMEMIDIProtocol.h"
+#import "USBReader.h"
 #import <objc/runtime.h>
 
 @implementation AppDelegate {
@@ -102,8 +103,8 @@
     [_menu addItem:_protoItem];
     [_menu addItem:[NSMenuItem separatorItem]];
 
-    // 过滤器
-    _filterItem = [[NSMenuItem alloc] initWithTitle:@"过滤器" action:nil keyEquivalent:@""];
+    // 放行(白名单) —— 内部变量名仍叫 _filterItem,免得全文件改一遍
+    _filterItem = [[NSMenuItem alloc] initWithTitle:@"放行(白名单)" action:nil keyEquivalent:@""];
     [_menu addItem:_filterItem];
 
     // transport 键翻译(MMC/SPP -> CC),Logic 里能直接学习
@@ -139,28 +140,61 @@
 // ---------- transport 键翻译 ----------
 - (void)rebuildTransportMenu {
     NSMenu *sub = [[NSMenu alloc] init];
-    NSMenuItem *legend = [[NSMenuItem alloc] initWithTitle:@"琴发的是 MMC(非 CC),这里翻成 CC 才能被 DAW 学到" action:nil keyEquivalent:@""];
+    NSMenuItem *legend = [[NSMenuItem alloc] initWithTitle:@"琴发的是 MMC/SPP(不是 CC),三选一,互斥" action:nil keyEquivalent:@""];
     legend.enabled = NO;
     [sub addItem:legend];
     [sub addItem:[NSMenuItem separatorItem]];
-    NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:@"MMC/SPP → CC114-119(推荐勾选)" action:@selector(toggleFilter:) keyEquivalent:@""];
-    item.target = self;
-    item.representedObject = @"translateMMC";
-    item.state = self.core.mapper.translateMMC ? NSControlStateValueOn : NSControlStateValueOff;
-    [sub addItem:item];
-    NSMenuItem *mcu = [[NSMenuItem alloc] initWithTitle:@"用 Mackie Control 发 transport(Logic 装 Mackie Control 表面)" action:@selector(toggleFilter:) keyEquivalent:@""];
-    mcu.target = self;
-    mcu.representedObject = @"useMackie";
-    mcu.state = self.core.useMackieTransport ? NSControlStateValueOn : NSControlStateValueOff;
-    [sub addItem:mcu];
-    NSMenuItem *mcuNote = [[NSMenuItem alloc] initWithTitle:@"  开了它:琴的键走 MCU 口,弹奏照旧从虚拟输出进 DAW" action:nil keyEquivalent:@""];
-    mcuNote.enabled = NO;
-    [sub addItem:mcuNote];
-    [sub addItem:[NSMenuItem separatorItem]];
-    NSMenuItem *note = [[NSMenuItem alloc] initWithTitle:@"不勾 = 原样发 MMC(F0 7F..)" action:nil keyEquivalent:@""];
-    note.enabled = NO;
-    [sub addItem:note];
+
+    BOOL mackie = self.core.useMackieTransport;
+    BOOL ccMode = self.core.mapper.translateMMC;
+
+    // 三选一:单选语义,避免「两个都勾但只有一个生效」那种骗人状态
+    NSMenuItem *a = [[NSMenuItem alloc] initWithTitle:@"用 Mackie Control 发 transport(推荐,Logic 装 Mackie Control 表面)"
+                                               action:@selector(selectTransportMode:) keyEquivalent:@""];
+    a.target = self; a.representedObject = @"modeMackie";
+    a.state = (mackie && !ccMode) ? NSControlStateValueOn : NSControlStateValueOff;   // Mackie 优先
+    [sub addItem:a];
+    NSMenuItem *aNote = [[NSMenuItem alloc] initWithTitle:@"  走带从「CME UF8 Router MCU」口出去,弹奏照旧走虚拟输出" action:nil keyEquivalent:@""];
+    aNote.enabled = NO;
+    [sub addItem:aNote];
+
+    NSMenuItem *b = [[NSMenuItem alloc] initWithTitle:@"翻成 CC114-119(CC#114-119 那项要放行)"
+                                               action:@selector(selectTransportMode:) keyEquivalent:@""];
+    b.target = self; b.representedObject = @"modeCC";
+    b.state = (ccMode && !mackie) ? NSControlStateValueOn : NSControlStateValueOff;
+    [sub addItem:b];
+    NSMenuItem *bNote = [[NSMenuItem alloc] initWithTitle:@"  适合「不想装控制表面,只在乐器轨上学 CC」" action:nil keyEquivalent:@""];
+    bNote.enabled = NO;
+    [sub addItem:bNote];
+
+    NSMenuItem *c = [[NSMenuItem alloc] initWithTitle:@"原样转发 MMC(F0 7F …,不做任何翻译)"
+                                               action:@selector(selectTransportMode:) keyEquivalent:@""];
+    c.target = self; c.representedObject = @"modeRaw";
+    c.state = (!mackie && !ccMode) ? NSControlStateValueOn : NSControlStateValueOff;
+    [sub addItem:c];
+
     _transportItem.submenu = sub;
+}
+
+- (void)selectTransportMode:(NSMenuItem *)sender {
+    NSString *mode = sender.representedObject;
+    MIDIMapper *mp = self.core.mapper;
+    if ([mode isEqualToString:@"modeMackie"]) {
+        mp.translateMMC = NO;
+        if (!self.core.useMackieTransport) self.core.useMackieTransport = YES;
+        [self.core log:@"走带: Mackie Control(MCU 口)"];
+    } else if ([mode isEqualToString:@"modeCC"]) {
+        if (self.core.useMackieTransport) self.core.useMackieTransport = NO;
+        mp.translateMMC = YES;
+        [self.core log:@"走带: 翻成 CC114-119"];
+    } else {
+        if (self.core.useMackieTransport) self.core.useMackieTransport = NO;
+        mp.translateMMC = NO;
+        [self.core log:@"走带: 原样转发 MMC"];
+    }
+    [mp saveConfig];
+    [self rebuildTransportMenu];
+    [self rebuildFilterMenu];   // 走带那项的语义提示跟着模式变
 }
 
 - (void)statusClicked:(id)sender {
@@ -169,7 +203,7 @@
 }
 
 - (void)updateStatusRow {
-    NSString *src = self.core.selectedSourceName ?: @"(未选)";
+    NSString *src = self.core.usbInput ? @"USB直连" : (self.core.selectedSourceName ?: @"(未选)");
     NSString *dst = self.core.selectedDestName ?: @"(未选)";
     NSString *proto = @"自动";
     switch (self.core.protocolMode) {
@@ -189,11 +223,19 @@
 // ---------- 输入源子菜单 ----------
 - (void)rebuildSourceMenu {
     NSMenu *sub = [[NSMenu alloc] init];
+    BOOL usbOK = [USBMIDIReader devicePresent];
+    NSString *usbTitle = usbOK ? @"用 USB 直连琴(不用转接头)" : @"用 USB 直连琴(未检测到琴)";
+    NSMenuItem *usb = [[NSMenuItem alloc] initWithTitle:usbTitle action:@selector(selectUSBInput:) keyEquivalent:@""];
+    usb.target = self;
+    usb.state = self.core.usbInput ? NSControlStateValueOn : NSControlStateValueOff;
+    [sub addItem:usb];
+    [sub addItem:[NSMenuItem separatorItem]];
     for (NSString *name in self.core.sourceNames) {
         NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:name action:@selector(selectSource:) keyEquivalent:@""];
         item.target = self;
         item.representedObject = name;
-        item.state = [name isEqualToString:self.core.selectedSourceName] ? NSControlStateValueOn : NSControlStateValueOff;
+        item.state = (!self.core.usbInput && [name isEqualToString:self.core.selectedSourceName])
+                     ? NSControlStateValueOn : NSControlStateValueOff;
         [sub addItem:item];
     }
     if (self.core.sourceNames.count == 0) {
@@ -205,9 +247,22 @@
 }
 
 - (void)selectSource:(NSMenuItem *)sender {
+    if (self.core.usbInput) self.core.usbInput = NO;   // 换端口就等于放弃 USB 直连
     self.core.selectedSourceName = sender.representedObject;
     [self updateStatusRow];
     [self rebuildSourceMenu];
+    [self rebuildProtoMenu];
+}
+
+- (void)selectUSBInput:(id)sender {
+    if (self.core.usbInput) {
+        // 已经勾着:再点一次 = 重试(拔插之后必须能点活)
+        self.core.usbInput = NO;
+    }
+    self.core.usbInput = YES;
+    [self updateStatusRow];
+    [self rebuildSourceMenu];
+    [self rebuildProtoMenu];
 }
 
 // ---------- 输出目标子菜单 ----------
@@ -261,29 +316,90 @@
 // ---------- 过滤器 ----------
 - (void)rebuildFilterMenu {
     NSMenu *sub = [[NSMenu alloc] init];
-    NSMenuItem *legend = [[NSMenuItem alloc] initWithTitle:@"勾选 = 丢弃该类消息(默认全不勾)" action:nil keyEquivalent:@""];
+    NSMenuItem *legend = [[NSMenuItem alloc] initWithTitle:@"勾选 = 放行(不勾 = 丢弃)" action:nil keyEquivalent:@""];
     legend.enabled = NO;
     [sub addItem:legend];
+    NSMenuItem *legend2 = [[NSMenuItem alloc] initWithTitle:@"白名单:没勾的东西一律进不了 DAW" action:nil keyEquivalent:@""];
+    legend2.enabled = NO;
+    [sub addItem:legend2];
     [sub addItem:[NSMenuItem separatorItem]];
-    NSArray *filters = @[
-        @{@"title": @"过滤 CC#1 调制轮(故障源)", @"key": @"filterCC1"},
-        @{@"title": @"过滤 CC#7 音量(故障源)", @"key": @"filterCC7"},
-        @{@"title": @"过滤 时钟/实时消息", @"key": @"filterClock"},
-        @{@"title": @"过滤 Active Sensing", @"key": @"filterSensing"},
+    MIDIMapper *mp = self.core.mapper;
+    NSArray *rows = @[
+        @{@"title": @"键盘音符", @"key": @"allowNotes",   @"on": @(mp.allowNotes)},
+        @{@"title": @"弯音轮", @"key": @"allowPitch",     @"on": @(mp.allowPitch)},
+        @{@"title": @"控制器 CC(推子/旋钮,不含 #1/#2/#7/#64/#114-119)", @"key": @"allowCC", @"on": @(mp.allowCC)},
+        @{@"title": @"系统专用(sysex / MMC / SPP)", @"key": @"allowSysEx", @"on": @(mp.allowSysEx)},
+        @{@"title": @"时钟 F8(琴空闲也发 77 条/秒)", @"key": @"allowClock", @"on": @(mp.allowClock)},
+        @{@"title": @"Active Sensing(心跳,纯噪音)", @"key": @"allowSensing", @"on": @(mp.allowSensing)},
     ];
-    for (NSDictionary *f in filters) {
-        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:f[@"title"] action:@selector(toggleFilter:) keyEquivalent:@""];
+    for (NSDictionary *r in rows) {
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:r[@"title"] action:@selector(toggleFilter:) keyEquivalent:@""];
         item.target = self;
-        item.representedObject = f[@"key"];
-        BOOL on = NO;
-        if ([f[@"key"] isEqualToString:@"filterCC1"]) on = self.core.mapper.filterCC1;
-        if ([f[@"key"] isEqualToString:@"filterCC7"]) on = self.core.mapper.filterCC7;
-        if ([f[@"key"] isEqualToString:@"filterClock"]) on = self.core.mapper.filterClock;
-        if ([f[@"key"] isEqualToString:@"filterSensing"]) on = self.core.mapper.filterSensing;
-        item.state = on ? NSControlStateValueOn : NSControlStateValueOff;
+        item.representedObject = r[@"key"];
+        item.state = [r[@"on"] boolValue] ? NSControlStateValueOn : NSControlStateValueOff;
         [sub addItem:item];
     }
+    // 四个常用号单独列出来(整类 CC 的开关不覆盖它们),默认全放行
+    [sub addItem:[NSMenuItem separatorItem]];
+    NSMenuItem *excParent = [[NSMenuItem alloc] initWithTitle:@"单个 CC 号(默认全放行)" action:nil keyEquivalent:@""];
+    NSMenu *exc = [[NSMenu alloc] init];
+    NSMenuItem *excLegend = [[NSMenuItem alloc] initWithTitle:@"整类 CC 不含这四号,这里单独管" action:nil keyEquivalent:@""];
+    excLegend.enabled = NO;
+    [exc addItem:excLegend];
+    [exc addItem:[NSMenuItem separatorItem]];
+    NSArray *excRows = @[
+        @{@"title": @"CC#1 调制轮(历史故障源)", @"key": @"allowCC1",  @"on": @(mp.allowCC1)},
+        @{@"title": @"CC#2 呼吸控制",           @"key": @"allowCC2",  @"on": @(mp.allowCC2)},
+        @{@"title": @"CC#7 音量/推子(历史故障源)", @"key": @"allowCC7", @"on": @(mp.allowCC7)},
+        @{@"title": @"CC#64 延音踏板",           @"key": @"allowCC64", @"on": @(mp.allowCC64)},
+        @{@"title": @"走带: CC#114-119 + CC#60 Jog(RTZ/REW/FF/REC/STOP/PLAY)", @"key": @"allowCC114", @"on": @(mp.allowCC114)},
+    ];
+    for (NSDictionary *r in excRows) {
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:r[@"title"] action:@selector(toggleFilter:) keyEquivalent:@""];
+        item.target = self;
+        item.representedObject = r[@"key"];
+        item.state = [r[@"on"] boolValue] ? NSControlStateValueOn : NSControlStateValueOff;
+        [exc addItem:item];
+    }
+    NSMenuItem *mcuNote = [[NSMenuItem alloc] initWithTitle:@"开了 Mackie Control 时,走带走 MCU 端口,不受这里限制"
+                                                     action:nil keyEquivalent:@""];
+    mcuNote.enabled = NO;
+    [exc addItem:[NSMenuItem separatorItem]];
+    [exc addItem:mcuNote];
+    excParent.submenu = exc;
+    [sub addItem:excParent];
+
+    [sub addItem:[NSMenuItem separatorItem]];
+    NSMenuItem *pick = [[NSMenuItem alloc] initWithTitle:@"一键:只放行键盘+弯音+踏板(最干净)" action:@selector(presetCleanFilter:) keyEquivalent:@""];
+    pick.target = self;
+    [sub addItem:pick];
+    NSMenuItem *all = [[NSMenuItem alloc] initWithTitle:@"一键:全部放行(排障时用)" action:@selector(presetAllowAll:) keyEquivalent:@""];
+    all.target = self;
+    [sub addItem:all];
     _filterItem.submenu = sub;
+}
+
+- (void)presetCleanFilter:(id)sender {
+    MIDIMapper *mp = self.core.mapper;
+    // 最干净 = 只留 键盘 / 弯音 / 延音踏板(CC#64)。其余全关:
+    // 推子旋钮(整类 CC)、CC#1/#2/#7、走带 CC、sysex、时钟、心跳
+    mp.allowNotes = YES; mp.allowPitch = YES; mp.allowCC = NO;
+    mp.allowSysEx = NO; mp.allowClock = NO; mp.allowSensing = NO;
+    mp.allowCC1 = NO; mp.allowCC2 = NO; mp.allowCC7 = NO; mp.allowCC64 = YES; mp.allowCC114 = NO;
+    [mp saveConfig];
+    [self rebuildFilterMenu];
+    [self.core log:@"放行: 只留 键盘/弯音/延音踏板,其余全关"];
+}
+
+- (void)presetAllowAll:(id)sender {
+    MIDIMapper *mp = self.core.mapper;
+    mp.allowNotes = YES; mp.allowPitch = YES; mp.allowCC = YES;
+    mp.allowSysEx = YES; mp.allowClock = YES; mp.allowSensing = YES;
+    // 五个单独 CC 号也必须一起打开,否则预设跑完子菜单还是空勾(用户会以为没生效)
+    mp.allowCC1 = YES; mp.allowCC2 = YES; mp.allowCC7 = YES; mp.allowCC64 = YES; mp.allowCC114 = YES;
+    [mp saveConfig];
+    [self rebuildFilterMenu];
+    [self.core log:@"放行: 全部(含时钟与 ActiveSensing)"];
 }
 
 // 抓包默认关:它会写盘、也会把弹的东西落成日志。只有排障时才开
@@ -299,8 +415,17 @@
 - (void)toggleFilter:(NSMenuItem *)sender {
     NSString *key = sender.representedObject;
     MIDIMapper *mapper = self.core.mapper;   // 别用空 _mapper:菜单动作必须始终有主
-    if ([key isEqualToString:@"filterCC1"]) mapper.filterCC1 = !mapper.filterCC1;
-    if ([key isEqualToString:@"filterCC7"]) mapper.filterCC7 = !mapper.filterCC7;
+    if ([key isEqualToString:@"allowNotes"])   mapper.allowNotes   = !mapper.allowNotes;
+    if ([key isEqualToString:@"allowPitch"])   mapper.allowPitch   = !mapper.allowPitch;
+    if ([key isEqualToString:@"allowCC"])      mapper.allowCC      = !mapper.allowCC;
+    if ([key isEqualToString:@"allowSysEx"])   mapper.allowSysEx   = !mapper.allowSysEx;
+    if ([key isEqualToString:@"allowClock"])   mapper.allowClock   = !mapper.allowClock;
+    if ([key isEqualToString:@"allowSensing"]) mapper.allowSensing = !mapper.allowSensing;
+    if ([key isEqualToString:@"allowCC1"])  mapper.allowCC1  = !mapper.allowCC1;
+    if ([key isEqualToString:@"allowCC2"])  mapper.allowCC2  = !mapper.allowCC2;
+    if ([key isEqualToString:@"allowCC7"])  mapper.allowCC7  = !mapper.allowCC7;
+    if ([key isEqualToString:@"allowCC64"]) mapper.allowCC64 = !mapper.allowCC64;
+    if ([key isEqualToString:@"allowCC114"]) mapper.allowCC114 = !mapper.allowCC114;
     if ([key isEqualToString:@"filterClock"]) mapper.filterClock = !mapper.filterClock;
     if ([key isEqualToString:@"filterSensing"]) mapper.filterSensing = !mapper.filterSensing;
     if ([key isEqualToString:@"translateMMC"]) mapper.translateMMC = !mapper.translateMMC;
@@ -434,15 +559,16 @@ static int validateMenu(NSMenu *menu, NSString *prefix) {
     int fails = 0;
     printf("=== 菜单动作自检 ===\n");
 
-    // 1) 过滤器 CC#1:点一下应翻转
-    NSMenuItem *cc1 = nil;
+    // 1) 白名单「时钟」:点一下应翻转
+    NSMenuItem *clockItem = nil;
     for (NSMenuItem *it in d->_filterItem.submenu.itemArray)
-        if (it.action == @selector(toggleFilter:)) { cc1 = it; break; }
-    BOOL before = d.core.mapper.filterCC1;
-    [NSApp sendAction:cc1.action to:cc1.target from:cc1];
-    BOOL after = d.core.mapper.filterCC1;
-    printf("%s 过滤器 CC#1: %d -> %d\n", before != after ? "ok  " : "FAIL", before, after);
+        if ([it.representedObject isEqual:@"allowClock"]) { clockItem = it; break; }
+    BOOL before = d.core.mapper.allowClock;
+    [NSApp sendAction:clockItem.action to:clockItem.target from:clockItem];
+    BOOL after = d.core.mapper.allowClock;
+    printf("%s 白名单 时钟 F8: %d -> %d\n", before != after ? "ok  " : "FAIL", before, after);
     if (before == after) fails++;
+    [NSApp sendAction:clockItem.action to:clockItem.target from:clockItem];   // 复原
 
     // 2) 协议模式选 CME-USB:protocolMode 应变为 CME
     NSMenuItem *cmeItem = nil;
@@ -455,7 +581,10 @@ static int validateMenu(NSMenu *menu, NSString *prefix) {
 
     // 3) 输入源:点第一项,应成为选中源并真的连上
     if (d.core.sourceNames.count > 0) {
-        NSMenuItem *src0 = d->_srcItem.submenu.itemArray.firstObject;
+        // 第一项现在是「用 USB 直连琴」(representedObject=nil),要挑真正的端口项
+        NSMenuItem *src0 = nil;
+        for (NSMenuItem *it in d->_srcItem.submenu.itemArray)
+            if ([it.representedObject isKindOfClass:[NSString class]]) { src0 = it; break; }
         [NSApp sendAction:src0.action to:src0.target from:src0];
         BOOL srcOK = [d.core.selectedSourceName isEqualToString:d.core.sourceNames.firstObject];
         printf("%s 选输入源 '%s'\n", srcOK ? "ok  " : "FAIL", d.core.selectedSourceName.UTF8String ?: "(nil)");
@@ -464,24 +593,32 @@ static int validateMenu(NSMenu *menu, NSString *prefix) {
         printf("skip 无输入源,跳过选择测试\n");
     }
 
-    // 4) Mackie Control 开关:点两次(on -> off),端口该建该撤,不能卡死
-    NSMenuItem *mcuItem = nil;
-    for (NSMenuItem *it in d->_transportItem.submenu.itemArray)
-        if ([it.representedObject isEqualToString:@"useMackie"]) mcuItem = it;
-    if (mcuItem) {
-        BOOL before2 = d.core.useMackieTransport;
+    // 4) 走带三选一:先切「原样转发」清零,再切 Mackie,最后切回原样(端口该建该撤,不能卡死)
+    NSMenuItem *mcuItem = nil, *rawItem = nil;
+    for (NSMenuItem *it in d->_transportItem.submenu.itemArray) {
+        if ([it.representedObject isEqualToString:@"modeMackie"]) mcuItem = it;
+        if ([it.representedObject isEqualToString:@"modeRaw"])    rawItem = it;
+    }
+    if (mcuItem && rawItem) {
+        [NSApp sendAction:rawItem.action to:rawItem.target from:rawItem];
+        usleep(200000);
+        BOOL off1 = (d.core.useMackieTransport == NO);
+        printf("%s 走带 -> 原样转发(MCU 口应已撤) -> %d\n", off1 ? "ok  " : "FAIL", (int)d.core.useMackieTransport);
+        if (!off1) fails++;
+
         [NSApp sendAction:mcuItem.action to:mcuItem.target from:mcuItem];
         usleep(200000);
-        BOOL onOK = (d.core.useMackieTransport != before2);
-        printf("%s 勾选 Mackie Control transport -> %d\n", onOK ? "ok  " : "FAIL", (int)d.core.useMackieTransport);
+        BOOL onOK = (d.core.useMackieTransport == YES);
+        printf("%s 走带 -> Mackie Control(MCU 口应已建) -> %d\n", onOK ? "ok  " : "FAIL", (int)d.core.useMackieTransport);
         if (!onOK) fails++;
-        [NSApp sendAction:mcuItem.action to:mcuItem.target from:mcuItem];
+
+        [NSApp sendAction:rawItem.action to:rawItem.target from:rawItem];
         usleep(200000);
-        BOOL offOK = (d.core.useMackieTransport == before2);
-        printf("%s 取消勾选(端口应已撤,未卡死) -> %d\n", offOK ? "ok  " : "FAIL", (int)d.core.useMackieTransport);
-        if (!offOK) fails++;
+        BOOL off2 = (d.core.useMackieTransport == NO);
+        printf("%s 再切回原样转发(未卡死) -> %d\n", off2 ? "ok  " : "FAIL", (int)d.core.useMackieTransport);
+        if (!off2) fails++;
     } else {
-        printf("FAIL 找不到 Mackie Control 菜单项\n");
+        printf("FAIL 找不到走带模式菜单项\n");
         fails++;
     }
 

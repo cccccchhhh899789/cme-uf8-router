@@ -21,10 +21,11 @@ SRCS=(
   src/RouterCore.m
   src/CMEMIDIProtocol.m
   src/MIDIMapper.m
+  src/USBReader.m
 )
 
 FRAMEWORKS=""
-for fw in Cocoa CoreMIDI CoreFoundation IOKit Foundation; do
+for fw in Cocoa CoreMIDI CoreFoundation IOKit IOUSBHost Foundation; do
   FRAMEWORKS="$FRAMEWORKS -framework $fw"
 done
 
@@ -71,7 +72,7 @@ cat > "$CONTENTS/Info.plist" <<'PLIST'
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.12</string>
+    <string>0.1.13</string>
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>LSMinimumSystemVersion</key>
@@ -81,7 +82,7 @@ cat > "$CONTENTS/Info.plist" <<'PLIST'
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSHumanReadableCopyright</key>
-    <string>cme-uf8-router 0.1.12</string>
+    <string>cme-uf8-router 0.1.13</string>
 </dict>
 </plist>
 PLIST

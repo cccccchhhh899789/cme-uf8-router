@@ -1,6 +1,7 @@
 // RouterCore.m — CoreMIDI 路由核心实现
 
 #import "RouterCore.h"
+#import "USBReader.h"
 #import <CoreMIDI/CoreMIDI.h>
 #include <sys/time.h>
 
@@ -60,12 +61,15 @@ static NSInteger CMECountEndpointsNamed(NSString *name) {
     NSMutableDictionary<NSString *, NSNumber *> *_destRefs;
     NSMutableData *_sysexBuf;         // 跨包不完整的 sysex(U2MIDI Pro 会把 sysex 拆成多包)
     CFTimeInterval _sysexBufTime;     // 最后一次拼包时间,用于「残包超时清理」
+    USBMIDIReader *_usb;              // USB 直读器(琴的 USB 口不是标准 MIDI 设备)
+    NSString *_lastUSBError;          // 上次 USB 打开失败的原因(菜单/日志用)
     NSInteger _lastTransportKey;      // 上一个 transport 事件(1..6),用于按住连发的去重
     CFTimeInterval _lastTransportTime;
 }
 
 @synthesize mapper = _mapper;
 @synthesize captureRawEnabled = _captureRawEnabled;
+@synthesize lastUSBError = _lastUSBError;
 
 - (instancetype)init {
     _mcuQueue = dispatch_queue_create("cme-uf8-router.mcu", DISPATCH_QUEUE_SERIAL);
@@ -279,16 +283,30 @@ static NSString *CMEEndpointDisplayName(MIDIEndpointRef ep, ItemCount i, NSStrin
         return;
     }
     _running = YES;
+    // 先定输入方式再枚举:refreshDevices 会按选择重连,顺序反了会先把端口接回来
+    if (_mapper.useUSB) _usbInput = YES;
     [self refreshDevices];
 
-    // 恢复上次选的输入/输出(名字还在就自动接上,免得每次重启都要手动选)
+    // 恢复上次的输入方式/设备(免得每次重启都要手动选)
     BOOL restored = NO;
-    if (_mapper.lastSource && [_sourceNames containsObject:_mapper.lastSource]) {
+    if (_usbInput) {
+        if ([self startUSBInput]) {
+            restored = YES;
+        } else {
+            // 启动路径也要回滚,和菜单路径保持一致(不然界面说 USB、实际全哑)
+            _usbInput = NO;
+            _mapper.useUSB = NO;
+            [_mapper saveConfig];
+            [self log:[NSString stringWithFormat:@"USB 直连不可用,已退回 MIDI 端口(原因: %@)", _lastUSBError ?: @"未知"]];
+            [self reconnectInputForSelected];
+        }
+    }
+    if (!restored && !_usbInput && _mapper.lastSource && [_sourceNames containsObject:_mapper.lastSource]) {
         _selectedSourceName = _mapper.lastSource;
         [self reconnectInputForSelected];
         [self log:[NSString stringWithFormat:@"已恢复输入源: %@", _mapper.lastSource]];
         restored = YES;
-    } else if (_mapper.lastSource) {
+    } else if (!restored && !_usbInput && _mapper.lastSource) {
         [self log:[NSString stringWithFormat:@"上次的输入源「%@」不在列表,回退到默认", _mapper.lastSource]];
     }
     if (_mapper.lastDest && [_destNames containsObject:_mapper.lastDest]) {
@@ -310,6 +328,7 @@ static NSString *CMEEndpointDisplayName(MIDIEndpointRef ep, ItemCount i, NSStrin
     // 不带 _running 门槛:start 半途失败时 _running 还是 NO,但有端口已经建出来了,
     // 那种情况下正是最需要收摊的时候
     _stopping = YES;
+    [self stopUSBInput];
     if (_inputPort) { MIDIPortDispose(_inputPort); _inputPort = 0; }
     if (_outputPort) { MIDIPortDispose(_outputPort); _outputPort = 0; }
     [self teardownMCUEndpoints];
@@ -400,6 +419,11 @@ static void midiReadProc(const MIDIPacketList *pktlist, void *readProcRefCon, vo
 #pragma mark - 解码(含跨包 sysex 拼接)
 
 - (NSArray<NSData *> *)decodePacket:(const uint8_t *)data length:(NSUInteger)len {
+    return [self decodePacket:data length:len mode:_protocolMode];
+}
+
+// mode 显式传入:USB 直读时固定用 CME(Auto 也能过,但这里已知格式,少一层猜)
+- (NSArray<NSData *> *)decodePacket:(const uint8_t *)data length:(NSUInteger)len mode:(CMEMIDIProtocolMode)mode {
     if (!data || len == 0) return @[];
     if (!_sysexBuf) _sysexBuf = [NSMutableData data];
 
@@ -424,7 +448,7 @@ static void midiReadProc(const MIDIPacketList *pktlist, void *readProcRefCon, vo
 
     NSArray<NSData *> *msgs = [CMEMIDIProtocol decodeBytes:buf.bytes
                                                     length:buf.length
-                                                      mode:_protocolMode
+                                                      mode:mode
                                              sniffedToCME:NULL];
     NSMutableArray<NSData *> *out = [NSMutableArray array];
     for (NSData *m in msgs) {
@@ -466,38 +490,43 @@ static void midiReadProc(const MIDIPacketList *pktlist, void *readProcRefCon, vo
     for (UInt32 i = 0; i < pktlist->numPackets; i++) {
         [self captureRaw:packet->data length:packet->length];
         for (NSData *m in [self decodePacket:packet->data length:packet->length]) {
-            if (useMackie) {
-                NSInteger key = [_mapper transportKeyForMessage:m];
-                if (key > 0) {
-                    NSArray<NSData *> *mcu = [_mapper mcuMessagesForKey:key];
-                    // 只有「成对」事件(REC/STOP/PLAY)需要 0.4s 去重;
-                    // Jog(前后一格)是独立事件,连按必须每次都发
-                    BOOL paired = (mcu.count >= 2);
-                    if (!paired || [self mcuEventShouldEmitKey:key]) {
-                        if (mcu.count >= 2) {
-                            // 按下立刻发,松开故意晚 80ms:
-                            // 1) 同一时刻的 note-on/note-off 有些 DAW 会当成抖动丢掉 off,
-                            //    结果按键「卡住」——Logic 里表现成走带键一直快退/快进;
-                            // 2) 一次干脆的按下-松开 = 走一小节,不会连滚。
-                            [self sendToMCUSource:mcu[0]];
-                            NSData *release = mcu[1];
-                            // 用独立串行队列,不用主队列:主线程一忙(开菜单、日志刷新)
-                            // 松开就会迟到,按钮又「卡住」了
-                            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(80 * NSEC_PER_MSEC)),
-                                           self->_mcuQueue, ^{
-                                [self sendToMCUSource:release];
-                            });
-                        } else {
-                            for (NSData *out in mcu) [self sendToMCUSource:out];
-                        }
-                    }
-                    continue;   // transport 只走 MCU 口,不混进乐器输出
-                }
-            }
-            for (NSData *out in [_mapper processMessage:m]) [self sendMessage:out destRef:destRef];
+            [self dispatchMessage:m useMackie:useMackie destRef:destRef];
         }
         packet = MIDIPacketNext(packet);
     }
+}
+
+// 一条已解码的标准 MIDI 消息 -> 去往 MCU 口(transport)或普通输出口
+- (void)dispatchMessage:(NSData *)m useMackie:(BOOL)useMackie destRef:(NSNumber *)destRef {
+    if (useMackie) {
+        NSInteger key = [_mapper transportKeyForMessage:m];
+        if (key > 0) {
+            NSArray<NSData *> *mcu = [_mapper mcuMessagesForKey:key];
+            // 只有「成对」事件(REC/STOP/PLAY)需要 0.4s 去重;
+            // Jog(前后一格)是独立事件,连按必须每次都发
+            BOOL paired = (mcu.count >= 2);
+            if (!paired || [self mcuEventShouldEmitKey:key]) {
+                if (mcu.count >= 2) {
+                    // 按下立刻发,松开故意晚 80ms:
+                    // 1) 同一时刻的 note-on/note-off 有些 DAW 会当成抖动丢掉 off,
+                    //    结果按键「卡住」——Logic 里表现成走带键一直快退/快进;
+                    // 2) 一次干脆的按下-松开 = 走一小节,不会连滚。
+                    [self sendToMCUSource:mcu[0]];
+                    NSData *release = mcu[1];
+                    // 用独立串行队列,不用主队列:主线程一忙(开菜单、日志刷新)
+                    // 松开就会迟到,按钮又「卡住」了
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(80 * NSEC_PER_MSEC)),
+                                   self->_mcuQueue, ^{
+                        [self sendToMCUSource:release];
+                    });
+                } else {
+                    for (NSData *out in mcu) [self sendToMCUSource:out];
+                }
+            }
+            return;   // transport 只走 MCU 口,不混进乐器输出
+        }
+    }
+    for (NSData *out in [_mapper processMessage:m]) [self sendMessage:out destRef:destRef];
 }
 
 #pragma mark - Mackie Control 端口
@@ -598,14 +627,97 @@ static void midiReadProc(const MIDIPacketList *pktlist, void *readProcRefCon, vo
     CMESendToPort(_outputPort, (MIDIEndpointRef)(intptr_t)ref, msg);
 }
 
-// 只在选中的源上连接(避免串流其他源)
-- (void)reconnectInputForSelected {
+// 断开所有已连的源(切到 USB 输入、或者换源之前先清场)
+- (void)disconnectAllSources {
     if (!_inputPort || _stopping) return;
-    // 断开所有,连接选中的
     ItemCount srcCount = MIDIGetNumberOfSources();
     for (ItemCount i = 0; i < srcCount; i++) {
         MIDIPortDisconnectSource(_inputPort, MIDIGetSource(i));
     }
+}
+
+#pragma mark - USB 直连输入
+
+// USB 包 -> 标准 MIDI 消息。走 decodePacket(mode:CME):
+// 琴的 USB 口是混合格式 —— 音符/CC 用标准 CIN,走带用 CME 私有 0x0F 帧;
+// 而且 MMC 那条 6 字节 sysex 会被拆成两个 4 字节记录,必须靠 decodePacket 的跨包拼装
+- (void)handleUSBPacket:(NSData *)pkt {
+    if (_stopping || pkt.length == 0) return;
+    BOOL useMackie = NO;
+    NSNumber *destRef = nil;
+    @synchronized (self) {
+        useMackie = _useMackieTransport;
+        if (_selectedDestName) destRef = _destRefs[_selectedDestName];
+    }
+    if (_captureRawEnabled) [self captureRaw:pkt.bytes length:pkt.length];
+    for (NSData *m in [self decodePacket:pkt.bytes length:pkt.length mode:CMEMIDIProtocolModeCME]) {
+        [self dispatchMessage:m useMackie:useMackie destRef:destRef];
+    }
+}
+
+- (BOOL)startUSBInput {
+    if (!_usb) {
+        _usb = [[USBMIDIReader alloc] init];
+        __weak RouterCore *weakSelf = self;
+        _usb.packetHandler = ^(NSData *p) { [weakSelf handleUSBPacket:p]; };
+        _usb.errorHandler = ^(NSString *msg) {
+            RouterCore *me = weakSelf;
+            if (me) [me log:[NSString stringWithFormat:@"USB 读取中断: %@", msg]];
+        };
+    }
+    if (_usb.isRunning) return YES;
+    NSError *err = nil;
+    if (![_usb openDevice:&err]) {
+        _lastUSBError = (err.localizedDescription ?: @"未知原因").copy;
+        [self log:[NSString stringWithFormat:@"USB 直连失败: %@", _lastUSBError]];
+        return NO;
+    }
+    [_usb start];
+    _lastUSBError = nil;
+    [self log:@"输入方式: USB 直连(CME UF8)"];
+    return YES;
+}
+
+- (void)stopUSBInput {
+    if (!_usb) return;
+    [_usb stop];
+    _usb = nil;
+}
+
+- (void)setUsbInput:(BOOL)on {
+    // 只有「已经是这个状态,而且 USB 真的在跑」才早退;
+    // 以前直接 return 会让拔线后再点同一项毫无反应(H2)
+    if (_usbInput == on && (!on || _usb.isRunning)) return;
+    _usbInput = on;
+    _mapper.useUSB = on;
+    [_mapper saveConfig];
+    if (on) {
+        [self disconnectAllSources];   // 同一个琴别再经 CoreMIDI 串一遍
+        if (![self startUSBInput]) {
+            // 打开失败就**立刻回滚**:让界面如实反映「现在走的是端口」,
+            // 而不是勾着 USB、实际什么都没收到(以前那种状态会让人以为 App 坏了)
+            _usbInput = NO;
+            _mapper.useUSB = NO;
+            [_mapper saveConfig];
+            [self reconnectInputForSelected];
+            [self log:[NSString stringWithFormat:@"已退回 MIDI 端口输入(原因: %@)", _lastUSBError ?: @"USB 打不开"]];
+        }
+    } else {
+        [self stopUSBInput];
+        [self reconnectInputForSelected];
+        [self log:@"输入方式: MIDI 端口"];
+    }
+    [self.delegate routerDidRefreshDevices:self];
+}
+
+// 只在选中的源上连接(避免串流其他源)
+- (void)reconnectInputForSelected {
+    if (!_inputPort || _stopping) return;
+    if (_usbInput) {            // USB 直连时绝不连 CoreMIDI 源,否则同一台琴进两份
+        [self disconnectAllSources];
+        return;
+    }
+    [self disconnectAllSources];
     MIDIEndpointRef ep = 0;
     NSString *selName = nil;
     @synchronized (self) {
@@ -678,9 +790,16 @@ static void routeProbeProc(const MIDIPacketList *pktlist, void *refCon, void *co
     [core start];                      // 会 refreshDevices
     // 自检必须可重复:用户配置里可能正开着 MCU、或关着 MMC→CC 翻译。
     // 先压成固定基线(MCU 关、翻译开),需要的测试再自己打开。
+    // 自检靠 CoreMIDI 注入,不能占着 USB 直连(用户配置可能开着 useUSB)
+    core->_usbInput = NO;
+    [core stopUSBInput];
     core->_useMackieTransport = NO;
     core.mapper.translateMMC = YES;
     core.mapper.runtimeMuteCC = NO;
+    // 自检不依赖用户的白名单设置(有人会把 CC/走带 关掉),这里统一放行
+    core.mapper.allowNotes = YES; core.mapper.allowPitch = YES; core.mapper.allowCC = YES;
+    core.mapper.allowSysEx = YES; core.mapper.allowCC114 = YES;
+    core.mapper.allowCC1 = YES; core.mapper.allowCC2 = YES; core.mapper.allowCC7 = YES; core.mapper.allowCC64 = YES;
     NSString *srcName = nil, *dstName = nil;
     for (NSString *n in core.sourceNames) if ([n hasPrefix:@"CME-Test-Src"]) srcName = n;
     for (NSString *n in core.destNames) if ([n hasPrefix:@"CME-Test-Dst"]) dstName = n;
@@ -987,6 +1106,55 @@ static void routeProbeProc(const MIDIPacketList *pktlist, void *refCon, void *co
     if (!fails) printf("=> PASS (退出时所有端口都已撤)\n");
     else printf("=> FAIL (%d 项)\n", fails);
     return fails;
+}
+
++ (int)runUSBSelfTest {
+    printf("USB 直连自检(需插着琴并开机,采样 3 秒)\n");
+    if (![USBMIDIReader devicePresent]) {
+        printf("  ✗ USB 总线上找不到 CME UF8(0x7104:0x2202)\n");
+        return 1;
+    }
+    printf("  · 设备在总线上\n");
+    USBMIDIReader *r = [[USBMIDIReader alloc] init];
+    NSError *err = nil;
+    if (![r openDevice:&err]) {
+        printf("  ✗ 打开失败: %s\n", (err.localizedDescription ?: @"?").UTF8String);
+        return 1;
+    }
+    printf("  · 已打开 0x82 端点\n");
+    __block NSUInteger packets = 0, bytes = 0, clockPkts = 0, sensingPkts = 0, otherPkts = 0;
+    __block NSMutableString *sample = [NSMutableString string];
+    id lock = [[NSObject alloc] init];   // 只用来串行化统计,不引用 reader(避免循环引用)
+    r.packetHandler = ^(NSData *pkt) {
+        @synchronized (lock) {
+            packets++; bytes += pkt.length;
+            const uint8_t *b = pkt.bytes;
+            BOOL isClock = (pkt.length >= 2 && b[0] == 0x0F && b[1] == 0xF8) ||
+                           (pkt.length >= 1 && b[0] == 0xF8);
+            BOOL isSensing = (pkt.length >= 2 && b[0] == 0x0F && b[1] == 0xFE) ||
+                             (pkt.length >= 1 && b[0] == 0xFE);
+            if (isClock) clockPkts++;
+            else if (isSensing) sensingPkts++;
+            else {
+                otherPkts++;
+                if (sample.length < 300) {
+                    for (NSUInteger i = 0; i < pkt.length && i < 8; i++) [sample appendFormat:@"%02x ", b[i]];
+                    [sample appendString:@"| "];
+                }
+            }
+        }
+    };
+    [r start];
+    sleep(3);
+    [r stop];
+    printf("  3 秒收到 %lu 包 / %lu 字节(时钟 %lu、心跳 %lu、其余 %lu)\n",
+           (unsigned long)packets, (unsigned long)bytes,
+           (unsigned long)clockPkts, (unsigned long)sensingPkts, (unsigned long)otherPkts);
+    if (sample.length) printf("  样例: %s\n", sample.UTF8String);
+    if (packets == 0) { printf("  ✗ 一个包都没收到\n"); return 1; }
+    if (clockPkts == 0) printf("  ! 没看到时钟包(琴可能没在发,或这台的固件不发)\n");
+    printf("  => PASS (USB 直读通路正常)\n");
+    return 0;
 }
 
 + (void)runSelfTest {

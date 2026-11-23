@@ -15,9 +15,19 @@
 
 - (instancetype)init {
     if ((self = [super init])) {
-        // 默认不过滤:接进来什么就送出去什么(用户要勾才丢)
-        _filterCC1 = NO;
-        _filterCC7 = NO;
+        // 白名单默认:全部放行(= 和 0.1.12 行为一致,升级不会悄悄丢东西)
+        // 想「干净」用菜单里的「一键:只放行键盘+弯音+踏板」,别在默认值上偷偷改行为
+        _allowNotes = YES;
+        _allowPitch = YES;
+        _allowCC = YES;
+        _allowSysEx = YES;
+        _allowClock = YES;
+        _allowSensing = YES;
+        _allowCC1 = YES;      // 白名单:默认全放行,关掉才挡
+        _allowCC2 = YES;
+        _allowCC7 = YES;
+        _allowCC64 = YES;
+        _allowCC114 = YES;
         _filterClock = NO;
         _filterSensing = NO;
         _translateMMC = YES;
@@ -34,6 +44,32 @@
         [self loadConfig];
     }
     return self;
+}
+
+// 白名单判定:这条消息该不该送出去
+- (BOOL)messageAllowed:(NSData *)msg {
+    const uint8_t *b = msg.bytes;
+    if (msg.length == 0) return NO;
+    uint8_t st = b[0];
+    if (st >= 0xF8) return _allowClock;          // F8 时钟 / FA / FB / FC 等实时
+    if (st == 0xFE) return _allowSensing;        // Active Sensing
+    if (st == 0xF0) return _allowSysEx;          // sysex(含 MMC)
+    if (st == 0xF2) return _allowSysEx;          // SPP:系统公共,跟 sysex 归一类
+    switch (st & 0xF0) {
+        case 0x80: case 0x90: return _allowNotes;
+        case 0xE0: return _allowPitch;
+        case 0xB0: {
+            uint8_t cc = ([msg length] > 1) ? ((const uint8_t *)msg.bytes)[1] : 0;
+            if (cc == 1)  return _allowCC1;
+            if (cc == 2)  return _allowCC2;
+            if (cc == 7)  return _allowCC7;
+            if (cc == 64) return _allowCC64;
+            if (cc >= 114 && cc <= 119) return _allowCC114;
+            return _allowCC;
+        }
+        case 0xC0: case 0xD0: return _allowCC;
+        default: return _allowCC;
+    }
 }
 
 // 判定一条消息是不是 transport 事件
@@ -143,9 +179,9 @@
     // 单字节实时:ActiveSensing / 时钟单独处理;FA FB FC 交给 transport 判定
     if (len == 1) {
         uint8_t s = b[0];
-        if (s == 0xFE) { if (_filterSensing) return @[]; return @[msg]; }
+        if (s == 0xFE) { if (_filterSensing || !_allowSensing) return @[]; return @[msg]; }
         if (s >= 0xF8 && s != 0xFA && s != 0xFB && s != 0xFC) {
-            if (_filterClock) return @[];
+            if (_filterClock || !_allowClock) return @[];
             return @[msg];
         }
     }
@@ -153,8 +189,9 @@
     // transport 事件(MMC sysex / SPP / 实时 FA FC)
     NSInteger key = [self transportKeyForMessage:msg];
     if (key > 0) {
-        if (!_translateMMC || _runtimeMuteCC) return @[msg];   // 不翻译:原样转发 MMC/SPP
+        if (!_translateMMC || _runtimeMuteCC) return _allowSysEx ? @[msg] : @[];   // 不翻译:原样转发 MMC/SPP
         NSInteger cc = [self ccForTransportKey:key];
+        if (cc > 0 && !_allowCC114) return @[];   // 走带 CC 由「CC#114-119」那项单独管
         if (cc > 0) {
             // 成对发「按下 127 + 松开 0」:很多 DAW/插件只在值「变化」时触发,
             // 每次都是 127 等于没变化,第二次按就没反应
@@ -167,12 +204,17 @@
 
     // CC 消息(B0 ch CC val)
     if (len >= 3 && (b[0] & 0xF0) == 0xB0) {
+        if (!_allowCC) return @[];
         uint8_t ch = b[0] & 0x0F;
         uint8_t cc = b[1];
         uint8_t val = b[2];
         // 过滤
-        if (cc == 1 && _filterCC1) return @[];
-        if (cc == 7 && _filterCC7) return @[];
+        // 四个常用号有独立开关(整类 CC 不含它们),其余 CC 看 allowCC
+        if (cc == 1  && !_allowCC1)  return @[];
+        if (cc == 2  && !_allowCC2)  return @[];
+        if (cc == 7  && !_allowCC7)  return @[];
+        if (cc == 64 && !_allowCC64) return @[];
+        if (cc >= 114 && cc <= 119 && !_allowCC114) return @[];
         // transport 映射(仅 CH1 或全通道?)
         NSNumber *target = _transportMap[@(cc)];
         if (target && ch == 0) {
@@ -183,8 +225,8 @@
         return @[msg];
     }
 
-    // 其余消息原样放行(Note/PB/Program/Aftertouch/SysEx…)
-    return @[msg];
+    // 其余消息过白名单(Note/PB/Program/Aftertouch/SysEx…)
+    return [self messageAllowed:msg] ? @[msg] : @[];
 }
 
 // ---------- 配置持久化 ----------
@@ -233,13 +275,28 @@
         [self saveConfig];
         return;
     }
-    if (d[@"filterCC1"])     _filterCC1   = [d[@"filterCC1"] boolValue];
-    if (d[@"filterCC7"])     _filterCC7   = [d[@"filterCC7"] boolValue];
+    // 老配置(0.1.12 及以前)没有 allow*/useUSB 这些键。不补写的话,升级后
+    // 这些设置会「看起来生效、其实每次启动都回落默认」—— 顺手迁移一次
+    BOOL needsMigration = (d[@"allowNotes"] == nil) || (d[@"useUSB"] == nil);
+
+    // 老版本用的是 filterCCx(勾=丢弃),这里取反迁移成 allowCCx(勾=放行)
+    _allowCC1  = d[@"allowCC1"]  ? [d[@"allowCC1"]  boolValue] : (d[@"filterCC1"]  ? ![d[@"filterCC1"]  boolValue] : YES);
+    _allowCC2  = d[@"allowCC2"]  ? [d[@"allowCC2"]  boolValue] : (d[@"filterCC2"]  ? ![d[@"filterCC2"]  boolValue] : YES);
+    _allowCC7  = d[@"allowCC7"]  ? [d[@"allowCC7"]  boolValue] : (d[@"filterCC7"]  ? ![d[@"filterCC7"]  boolValue] : YES);
+    _allowCC64 = d[@"allowCC64"] ? [d[@"allowCC64"] boolValue] : (d[@"filterCC64"] ? ![d[@"filterCC64"] boolValue] : YES);
+    _allowCC114 = d[@"allowCC114"] ? [d[@"allowCC114"] boolValue] : YES;
     if (d[@"filterClock"])   _filterClock = [d[@"filterClock"] boolValue];
     if (d[@"filterSensing"]) _filterSensing = [d[@"filterSensing"] boolValue];
     // 只有用户显式在菜单里关掉才算关(老版本会把 MCU 模式的副作用写进来,不能信)
     if (d[@"translateMMCOffByUser"]) _translateMMC = ![d[@"translateMMCOffByUser"] boolValue];
     if (d[@"useMackie"]) _useMackie = [d[@"useMackie"] boolValue];
+    if (d[@"useUSB"]) _useUSB = [d[@"useUSB"] boolValue];
+    if (d[@"allowNotes"])   _allowNotes   = [d[@"allowNotes"] boolValue];
+    if (d[@"allowPitch"])   _allowPitch   = [d[@"allowPitch"] boolValue];
+    if (d[@"allowCC"])      _allowCC      = [d[@"allowCC"] boolValue];
+    if (d[@"allowSysEx"])   _allowSysEx   = [d[@"allowSysEx"] boolValue];
+    if (d[@"allowClock"])   _allowClock   = [d[@"allowClock"] boolValue];
+    if (d[@"allowSensing"]) _allowSensing = [d[@"allowSensing"] boolValue];
     if ([d[@"lastSource"] isKindOfClass:[NSString class]]) _lastSource = d[@"lastSource"];
     if ([d[@"lastDest"] isKindOfClass:[NSString class]])     _lastDest   = d[@"lastDest"];
     if (d[@"transportMap"] && [d[@"transportMap"] isKindOfClass:[NSDictionary class]]) {
@@ -249,18 +306,29 @@
         }
         if (map.count) _transportMap = map;
     }
+    if (needsMigration) [self saveConfig];   // 补齐新键,写回磁盘
 }
 
 - (void)saveConfig {
     NSMutableDictionary *d = [NSMutableDictionary dictionary];
     d[@"configVersion"] = @(1);
-    d[@"filterCC1"]     = @(_filterCC1);
-    d[@"filterCC7"]     = @(_filterCC7);
+    d[@"allowCC1"]      = @(_allowCC1);
+    d[@"allowCC2"]      = @(_allowCC2);
+    d[@"allowCC7"]      = @(_allowCC7);
+    d[@"allowCC64"]     = @(_allowCC64);
+    d[@"allowCC114"]    = @(_allowCC114);
     d[@"filterClock"]   = @(_filterClock);
     d[@"filterSensing"] = @(_filterSensing);
     d[@"translateMMC"]  = @(_translateMMC);
     d[@"translateMMCOffByUser"] = @(!_translateMMC);
     d[@"useMackie"] = @(_useMackie);
+    d[@"useUSB"] = @(_useUSB);
+    d[@"allowNotes"]   = @(_allowNotes);
+    d[@"allowPitch"]   = @(_allowPitch);
+    d[@"allowCC"]      = @(_allowCC);
+    d[@"allowSysEx"]   = @(_allowSysEx);
+    d[@"allowClock"]   = @(_allowClock);
+    d[@"allowSensing"] = @(_allowSensing);
     if (_lastSource) d[@"lastSource"] = _lastSource;
     if (_lastDest)   d[@"lastDest"]   = _lastDest;
     NSMutableDictionary *map = [NSMutableDictionary dictionary];
