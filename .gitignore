@@ -1,0 +1,18 @@
+# 构建产物
+build/
+*.o
+*.dSYM/
+
+# 打包产物（走 GitHub Release，不进 git）
+release/
+*.dmg
+*.zip
+
+# 外接 exFAT 盘产生的残渣
+._*
+.DS_Store
+
+# 编译出来的调试工具
+tools/midilist
+tools/mculisten
+tools/mmctest

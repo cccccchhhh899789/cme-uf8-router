@@ -1,0 +1,166 @@
+============================================================
+  cme-uf8-router — CME UF8 (一代) MIDI 路由器 · 使用说明
+============================================================
+版本 0.1.6 · universal2 (x86_64 + arm64,Intel 与 M 芯片通用)
+
+【这是什么】
+把 CME UF8 键盘(含非标准信号的型号)接进 Mac 的 MIDI 路由器。
+- 输入源、输出目标都由你自己在下拉里选(不写死 USB 口)
+- 支持串联:实体键盘从别的 MIDI 接口进来也能用
+- 协议自动识别:CME 的 0x0F 私有帧 或 标准 MIDI 流,自动判断,也可手动指定
+
+【安装(在你自己的电脑上)】
+1. 打开 DMG,把 cme-uf8-router.app 拖入「应用程序」
+2. 双击启动(菜单栏出现 UF8 图标)
+3. 首次启动若提示「无法验证开发者」:右键 App → 打开 → 确认(ad-hoc 签名属正常)
+4. 在菜单里选【输入源】= 键盘进 Mac 的口,【输出目标】= DAW 或虚拟入口
+
+【换到别的电脑使用】
+- 直接拷 DMG(App 是 universal2,Intel / M 芯片都跑)
+- 新电脑同样:打开 DMG → 拖入应用程序 → 打开
+- 无需安装任何额外框架或驱动(纯系统 CoreMIDI)
+
+【关于「找不到 MIDI 设备」(0.1.2 已修)】
+菜单里的【输入源】列出的是 macOS CoreMIDI 当前在线的所有源,格式:
+    <端口名> — <设备名>        例:Port 1 — U2MIDI Pro
+- 任何 CoreMIDI 源都能选进来,不需要额外的「桥」或虚拟端口。
+- 列出来的是「接口/设备」,不是琴的名字:UF8 走 5-pin 接 U2MIDI Pro 时,
+  会显示成 Port 1 — U2MIDI Pro,这就是你的琴。
+- 列表为空 = 系统层面就没看到设备:先确认接口插好、驱动在(系统信息 → USB),
+  再点【刷新设备】。
+- 只插了一个源时会自动选中,不用手点。
+
+【菜单说明】
+  ● 输入源 → 输出目标 [协议]  ← 顶部状态行
+  ──────────────────────────
+  输入源 >      选 MIDI 输入(键盘实际接入的)
+  输出目标 >    CME UF8 Router(虚拟输出 → 给 DAW 用)   ← 默认,选这个
+                其他项 = 真实硬件端口(把消息送回那台设备,一般用不到)
+  协议模式 >    自动识别(推荐) / CME-USB(0x0F 帧) / 标准流(DIN/串联)
+  ──────────────────────────
+  过滤器 >      勾选 = 丢弃该类消息。默认全不勾(原样直通),
+                只有遇到故障消息(某些琴发错 CC1/CC7)才需要勾
+  ──────────────────────────
+  刷新设备 / 查看日志 / 退出
+
+【常见问题】
+- 输入/输出列表是空的?
+  确认键盘已开机并插好;点「刷新设备」。若用的是接口盒/DIN,应看到对应接口名。
+- 苹果芯片提示无法打开?
+  App 已 ad-hoc 签名 + universal;首次请在 App 上右键→打开 放行。
+- 和旧 cme-uf8-bridge 的区别?
+  桥是「找 USB→建虚拟源」固定写法;本 App 是「任意源 → 任意目标」可配置路由器,
+  且补全了 CME 0x0F 私有协议的支持(transport 键/特殊信号不再丢)。
+- transport 键(PLAY/STOP/REC 等)发的不是标准 MIDI?
+  协议模式选「自动识别」即可;这些键默认映射为 CC 114–119(见复刻规格书.md §3),
+  可在 ~/Library/Application Support/cme-uf8-router/midi-map.plist 调整。
+
+
+【transport 键(播放/停止/录音/快进/快退)怎么用 —— Mackie Control 方案】
+
+证据(两条,互相印证):
+  1) 2006 年原驱动 readme.txt 写明(PС v1.0.5 / MAC v1.1.0):
+       RTZ→CC115  REW→CC116  FF→CC117  REC→CC114  STOP→CC118  PLAY→CC119
+       M.VOLUME 推子 → CC#7,CH1
+  2) 真机抓包(本机 U2MIDI Pro 进 Mac)显示琴本身发的是 **标准 MMC**,
+     不是 CC —— 也就是说 CC114-119 是当年驱动在电脑侧做的翻译层,
+     和本 App 现在做的事一样。
+       REC 按下  F0 7F 00 06 06 F7 (Record Strobe)
+       REC 松开  F0 7F 00 06 07 F7 (Record Exit)
+       STOP      FC   (系统实时 Stop)
+       PLAY      FA   (系统实时 Start)
+       REW/FF/RTZ  F2 lsb msb (SPP,倒退/前进/归零)
+     Linux 内核只处理 CME 的 0x0F 私有帧,没有这张映射表,所以别处查不到。
+
+两种输出方式,菜单【transport 键】里二选一:
+
+A. Mackie Control(推荐,Logic/Cubase/Reaper/Ableton 全认,零学习成本)
+   1. 菜单【输出目标】→ 选「MCU: CME UF8 Router MCU (给 Logic 当 Mackie Control)」
+   2. DAW 里装控制表面:Mackie Control(Logic:控制表面设定 → 安装 → Mackie Control)
+      输入选 CME UF8 Router MCU,输出也选 CME UF8 Router MCU
+   3. 按琴上的 PLAY/STOP/REC/FF/REW 就能控制走带
+   对应关系(MCU 是 Note On CH1):
+       PLAY→0x5E  STOP→0x5D  REC→0x5F  FF→0x5C  REW→0x5B
+       RTZ→0x36(F1,Logic 里可把「回到起点」键命令绑给 F1)
+   App 会自动回应 MCU 的握手查询(F0 00 00 66 14 00 F7 → 00 66 14 01),DAW 才认。
+
+B. 翻译成 CC114-119(菜单里勾「MMC/SPP → CC114-119」,输出目标选普通虚拟输出)
+   在 Logic 里 ⌘K 控制器分配 → 学习 → 按琴上的键 → 指定参数,同样可用。
+   这个模式下 MMC 原件被替换,不会双触发。
+   想用 DAW 原生 MMC(Logic 设成 MMC 从机/Cubase 认 MMC):把该勾去掉,原样转发。
+
+【虚拟 MIDI 输出(给 DAW 用)】
+App 自己建一个虚拟 MIDI 源,名字就叫 "CME UF8 Router":
+- 打开 Logic / Ableton / Cubase / Reaper / Sibelius…
+- 在它的 MIDI 输入里选 "CME UF8 Router",弹琴就有声音
+- 不用装 IAC,不用建聚合设备,不用桥
+菜单【输出目标】默认就选中这一项;选成真实硬件端口才会把消息送回设备。
+
+【两套输出怎么分工(重要)】
+- 平时只有一个虚拟口:CME UF8 Router  ← 弹奏(音符/弯音/CC)走这里,DAW 的音轨输入选它
+- 只有你勾了「transport 键 → 用 Mackie Control 发 transport」,才会额外出现
+  CME UF8 Router MCU  ← 走带键走这里,Logic 里装 Mackie Control 表面时输入/输出都选它
+  不勾 = 这个口不存在,不会占用 DAW 的端口列表。
+  transport 键只走 MCU 口,弹奏照旧;两者互不干扰,弹 B4~D#5 也不会误触走带。
+
+【0.1.6 修了什么(实测走带键可用)】
+- MCU 按键「松开」被去重逻辑吞掉 → 修(Logic 里按键一直停在按下状态,表现就是按了没反应/偶尔响两下)
+- 输入源 / 输出目标 / Mackie Control 开关都会记住,重启不用再选
+- |<< 与 << 改为都发 MCU REWIND(原因见下)
+- 新增 tools/mculisten:监听 CME UF8 Router MCU 端口,排查走带键是否真的发出去
+
+【琴上最左两个键(|<< 和 <<)为什么一个样】
+这两个键在琴内部发的是**完全相同**的 F2 00 00(Song Position Pointer,位置=0),
+经 5-pin 进来后没有按键 ID,因此在电脑侧无法区分——这是硬件路径的限制。
+当年原厂驱动能分成 CC115/CC116,是因为它走 UF8 自己的 USB 口 + CME 私有帧(帧里带按键 ID)。
+现在两个键都发 MCU 的 REWIND;要「回到开头」用 Logic 自带的 Return 键。
+
+【按走带键时乐器跟着响(琴声)】
+MCU 的按键本身就是音符(REWIND=Note 91、STOP=93、PLAY=94、RECORD=95,CH1),
+乐器音轨和控制表面读的是同一股数据。关掉的办法:
+  Logic → 设置 → MIDI → 输入,把 CME UF8 Router MCU 这一项的勾取消(只留 CME UF8 Router)。
+  控制表面是直接读端口的,不受这个勾选影响。
+
+【Logic 说控制表面离线 / 走带键没反应时】
+App 重启时 MCU 端口会先消失再出现,Logic 可能把设备判成离线:
+  控制表面设定 → 选中 Mackie Control → 编辑 → 输入/输出 各重选一次 CME UF8 Router MCU。
+仍不行就删掉这台设备,重新「安装 → Mackie Control」建一次。
+
+【0.1.5 修了什么】
+- 勾选 Mackie Control 时 App 卡死 → 已修(拆除端口的函数误写成调用自己,无限递归)
+- 强制退出列表里看不到本 App → 属「仅菜单栏 App」特性,已在使用说明里给出 pkill 办法
+- MCU 端口改为按需创建:不勾选就完全不出现,不再常驻两个多余端口
+- 配置文件加版本号并自愈,避免旧版把「MMC→CC 翻译」误存成关闭
+
+【0.1.2 修了什么】
+- 「退出」灰着点不动 → 已修(菜单项目标改成 NSApp)
+- 输入源/输出目标菜单空白、找不到设备 → 已修(核心对象此前从未创建)
+- 点菜单项勾不动、协议模式切了没反应 → 已修(同上,配置对象为空)
+- 过滤器默认为「全不勾」(直通),不再偷偷丢 CC1/CC7/时钟
+- 设备名后加「— 设备名」,并支持同名端口自动加序号
+
+【退出 / 卡住了怎么办】
+正常退出:菜单栏 UF8 图标 → 退出(菜单最后一项)。
+它是「仅菜单栏」App(不占 Dock),所以 强制退出(⌥⌘esc) 列表里常常看不到它。
+万一卡死,任选一种:
+  1. 终端里执行:  pkill -f cme-uf8-router
+  2. 打开「活动监视器」,搜索 cme,选中后点 ✕ 强制退出
+  3. 再重新打开 App 即可(配置不会丢)
+
+【配置自愈(0.1.5)】
+0.1.4 及更早版本的配置文件里,MMC→CC 翻译会被 MCU 开关连带写成「关」。
+0.1.5 启动时若发现是老格式配置,会自动恢复默认并重新保存(过滤器全关、MMC→CC 开)。
+想彻底重来:删掉 ~/Library/Application Support/cme-uf8-router 再启动。
+
+【自检(排查用)】
+  App 内可执行文件 --selftest        协议层自检
+  App 内可执行文件 --menu-selftest   菜单项 target/action 自检(防灰显)
+  App 内可执行文件 --quit-selftest   端到端验证「退出」真能终止进程
+  App 内可执行文件 --action-selftest 真点菜单项(过滤器/协议/选源/退出)
+  App 内可执行文件 --route-selftest  端到端路由(含 MMC→CC、MMC→MCU 按键)
+  App 内可执行文件 --reset-config    配置文件恢复默认值
+
+【卸载】
+删掉 App 即可。若需清除配置:
+  rm -rf ~/Library/Application\ Support/cme-uf8-router
+============================================================
