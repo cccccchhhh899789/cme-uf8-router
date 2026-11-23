@@ -469,8 +469,11 @@ static void midiReadProc(const MIDIPacketList *pktlist, void *readProcRefCon, vo
             if (useMackie) {
                 NSInteger key = [_mapper transportKeyForMessage:m];
                 if (key > 0) {
-                    if ([self mcuEventShouldEmitKey:key]) {
-                        NSArray<NSData *> *mcu = [_mapper mcuMessagesForKey:key];
+                    NSArray<NSData *> *mcu = [_mapper mcuMessagesForKey:key];
+                    // 只有「成对」事件(REC/STOP/PLAY)需要 0.4s 去重;
+                    // Jog(前后一格)是独立事件,连按必须每次都发
+                    BOOL paired = (mcu.count >= 2);
+                    if (!paired || [self mcuEventShouldEmitKey:key]) {
                         if (mcu.count >= 2) {
                             // 按下立刻发,松开故意晚 80ms:
                             // 1) 同一时刻的 note-on/note-off 有些 DAW 会当成抖动丢掉 off,
@@ -817,6 +820,7 @@ static void routeProbeProc(const MIDIPacketList *pktlist, void *refCon, void *co
             }
 
             // 4d: SPP 路径(琴的 |<< 和 >> 只发 SPP,不发 MMC) —— 这条最容易悄悄坏掉
+            probe.want = 0xB0;               // Jog 轮是 CC(B0),探针原本只收 0x90
             usleep(300000);                  // 让「MMC 后 150ms 内吞 SPP」的窗口过期
             probe.got = 0;
             Byte sppFF[] = { 0xF2, 0x10, 0x00 };   // SPP=16,位置往后 => FF
@@ -826,7 +830,8 @@ static void routeProbeProc(const MIDIPacketList *pktlist, void *refCon, void *co
             for (int i = 0; i < 200 && !probe.got; i++) usleep(10000);
             if (!probe.got) printf("MCU:SPP 16(>>) → 2 秒内没收到 => FAIL\n");
             else printf("MCU:SPP 16(>>) → 收到: %02x %02x %02x => %s\n", probe.bytes[0], probe.bytes[1], probe.bytes[2],
-                   (probe.bytes[1] == 0x5C) ? "PASS(MCU FAST FWD 键)" : "内容不符 FAIL");
+                   (probe.bytes[0] == 0xB0 && probe.bytes[1] == 0x3C && probe.bytes[2] == 0x01)
+                   ? "PASS(Jog 轮 +1 = 向右一小节)" : "内容不符 FAIL");
 
             usleep(300000);
             probe.got = 0;
@@ -837,7 +842,9 @@ static void routeProbeProc(const MIDIPacketList *pktlist, void *refCon, void *co
             for (int i = 0; i < 200 && !probe.got; i++) usleep(10000);
             if (!probe.got) printf("MCU:SPP 0(|<<) → 2 秒内没收到 => FAIL\n");
             else printf("MCU:SPP 0(|<<) → 收到: %02x %02x %02x => %s\n", probe.bytes[0], probe.bytes[1], probe.bytes[2],
-                   (probe.bytes[1] == 0x5B) ? "PASS(MCU REWIND 键)" : "内容不符 FAIL");
+                   (probe.bytes[0] == 0xB0 && probe.bytes[1] == 0x3C && probe.bytes[2] == 0x41)
+                   ? "PASS(Jog 轮 -1 = 向左一小节)" : "内容不符 FAIL");
+            probe.want = 0x90;               // 后面的音符用例要收 0x90
 
             // 4b: 同一时刻弹奏的音符必须仍然从虚拟输出进 DAW
             if (vSrc) {

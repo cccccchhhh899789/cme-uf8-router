@@ -102,11 +102,22 @@
 
 // Mackie Control:transport 事件 -> MCU 按键(Note On CH1,按下 0x7F / 松开 0x00)
 - (NSArray<NSData *> *)mcuMessagesForKey:(NSInteger)key {
+    // 走带「前后一格」用 Jog 轮(CC 0x3C)而不是 FF/REW 按键(0x5B/0x5C):
+    // FF/REW 在 Logic 里收到按下就开始连续快进,而它对随后那条松开消息
+    // 完全无反应(实测 82ms/157ms/253ms/3s 全都不停,只有 STOP 能停),
+    // 所以「按住-松开」这条路在这个 DAW 上根本不成立。
+    // Jog 轮是一格一条消息,天然没有按下/松开状态机,一次 = 一小节。
+    // 0x01 = 顺时针 +1(向右/向后),0x41 = 逆时针 -1(向左/向前)。
+    uint8_t jogFwd[3] = { 0xB0, 0x3C, 0x01 };
+    uint8_t jogBack[3] = { 0xB0, 0x3C, 0x41 };
+    switch (key) {
+        case 1: return @[[NSData dataWithBytes:jogBack length:3]]; // RTZ -> 向左一小节
+        case 2: return @[[NSData dataWithBytes:jogBack length:3]]; // REWIND
+        case 3: return @[[NSData dataWithBytes:jogFwd length:3]];  // FAST FWD
+        default: break;
+    }
     uint8_t note = 0;
     switch (key) {
-        case 1: note = 0x5B; break; // RTZ -> 也用 REWIND(MCU 没有「回到起点」键,F1 在 Logic 里默认没绑定)
-        case 2: note = 0x5B; break; // REWIND
-        case 3: note = 0x5C; break; // FAST FWD
         case 4: note = 0x5F; break; // RECORD
         case 5: note = 0x5D; break; // STOP
         case 6: note = 0x5E; break; // PLAY

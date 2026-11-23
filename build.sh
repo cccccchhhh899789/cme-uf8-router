@@ -71,7 +71,7 @@ cat > "$CONTENTS/Info.plist" <<'PLIST'
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.11</string>
+    <string>0.1.12</string>
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>LSMinimumSystemVersion</key>
@@ -81,7 +81,7 @@ cat > "$CONTENTS/Info.plist" <<'PLIST'
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSHumanReadableCopyright</key>
-    <string>cme-uf8-router 0.1.11</string>
+    <string>cme-uf8-router 0.1.12</string>
 </dict>
 </plist>
 PLIST
