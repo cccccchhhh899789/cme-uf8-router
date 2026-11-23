@@ -48,6 +48,7 @@ static NSInteger CMECountEndpointsNamed(NSString *name) {
     MIDIEndpointRef _mcuDest;         // Mackie Control 输入口(Logic 把反馈发到这里)
     RouterCoreCallbackCtx _readCtx;
     dispatch_queue_t _midiQueue;      // 串行队列(抓包落盘等后台活)
+    dispatch_queue_t _mcuQueue;       // 串行队列:MCU 按键的「延迟松开」
     dispatch_queue_t _captureQueue;
     BOOL _running;
     volatile BOOL _stopping;          // 正在收摊:回调看到立刻返回,避免碰已 dispose 的句柄
@@ -67,6 +68,7 @@ static NSInteger CMECountEndpointsNamed(NSString *name) {
 @synthesize captureRawEnabled = _captureRawEnabled;
 
 - (instancetype)init {
+    _mcuQueue = dispatch_queue_create("cme-uf8-router.mcu", DISPATCH_QUEUE_SERIAL);
     if ((self = [super init])) {
         _mapper = [[MIDIMapper alloc] init];
         _protocolMode = CMEMIDIProtocolModeAuto;
@@ -468,7 +470,23 @@ static void midiReadProc(const MIDIPacketList *pktlist, void *readProcRefCon, vo
                 NSInteger key = [_mapper transportKeyForMessage:m];
                 if (key > 0) {
                     if ([self mcuEventShouldEmitKey:key]) {
-                        for (NSData *out in [_mapper mcuMessagesFor:m]) [self sendToMCUSource:out];
+                        NSArray<NSData *> *mcu = [_mapper mcuMessagesFor:m];
+                        if (mcu.count >= 2) {
+                            // 按下立刻发,松开故意晚 80ms:
+                            // 1) 同一时刻的 note-on/note-off 有些 DAW 会当成抖动丢掉 off,
+                            //    结果按键「卡住」——Logic 里表现成走带键一直快退/快进;
+                            // 2) 一次干脆的按下-松开 = 走一小节,不会连滚。
+                            [self sendToMCUSource:mcu[0]];
+                            NSData *release = mcu[1];
+                            // 用独立串行队列,不用主队列:主线程一忙(开菜单、日志刷新)
+                            // 松开就会迟到,按钮又「卡住」了
+                            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(80 * NSEC_PER_MSEC)),
+                                           self->_mcuQueue, ^{
+                                [self sendToMCUSource:release];
+                            });
+                        } else {
+                            for (NSData *out in mcu) [self sendToMCUSource:out];
+                        }
                     }
                     continue;   // transport 只走 MCU 口,不混进乐器输出
                 }
@@ -617,6 +635,7 @@ typedef struct {
     uint8_t bytes[16];
     int len;
     uint8_t want;      // 只收首字节等于它的包(0=全都收)
+    BOOL ignoreRelease; // 忽略 Note On 的「松开」(vel=0),只关心按下
 } CMERouteProbe;
 
 static void routeProbeProc(const MIDIPacketList *pktlist, void *refCon, void *connRefCon) {
@@ -624,6 +643,10 @@ static void routeProbeProc(const MIDIPacketList *pktlist, void *refCon, void *co
     const MIDIPacket *p = &pktlist->packet[0];
     for (UInt32 i = 0; i < pktlist->numPackets; i++) {
         if (probe->want && p->length > 0 && p->data[0] != probe->want) { p = MIDIPacketNext(p); continue; }
+        // 0.1.10 起 MCU 的「松开」故意延迟 80ms 才发,会串到下一个测试里,所以按需过滤
+        if (probe->ignoreRelease && p->length >= 3 && (p->data[0] & 0xF0) == 0x90 && p->data[2] == 0x00) {
+            p = MIDIPacketNext(p); continue;
+        }
         probe->count++;
         probe->totalBytes += (int)p->length;
         probe->len = (int)p->length;
@@ -760,6 +783,7 @@ static void routeProbeProc(const MIDIPacketList *pktlist, void *refCon, void *co
             core.selectedDestName = vName;
             core.useMackieTransport = YES;   // 会先发一次 device ready,必须在这之后连接探针
             probe.want = 0x90;               // 只关心 MCU 按键(Note On),忽略其它主机的握手包
+            probe.ignoreRelease = YES;       // 松开是延迟发的,会串场
             usleep(200000);
             MIDIPortRef in4 = 0;
             MIDIInputPortCreate(client, CFSTR("test-in4"), routeProbeProc, &probe, &in4);
@@ -840,6 +864,7 @@ static void routeProbeProc(const MIDIPacketList *pktlist, void *refCon, void *co
         }
         if (mcuSrc5) {
             probe.want = 0x90;
+            probe.ignoreRelease = NO;        // 这条要数「按下+松开」两半
             probe.got = 0;
             probe.count = 0;
             MIDIPortRef in6 = 0;
