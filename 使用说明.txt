@@ -1,7 +1,7 @@
 ============================================================
   cme-uf8-router — CME UF8 (一代) MIDI 路由器 · 使用说明
 ============================================================
-版本 0.1.7 · universal2 (x86_64 + arm64,Intel 与 M 芯片通用)
+版本 0.1.8 · universal2 (x86_64 + arm64,Intel 与 M 芯片通用)
 
 【这是什么】
 把 CME UF8 键盘(含非标准信号的型号)接进 Mac 的 MIDI 路由器。
@@ -102,6 +102,13 @@ App 自己建一个虚拟 MIDI 源,名字就叫 "CME UF8 Router":
   CME UF8 Router MCU  ← 走带键走这里,Logic 里装 Mackie Control 表面时输入/输出都选它
   不勾 = 这个口不存在,不会占用 DAW 的端口列表。
   transport 键只走 MCU 口,弹奏照旧;两者互不干扰,弹 B4~D#5 也不会误触走带。
+
+【0.1.8 加了什么】
+- 菜单栏图标:五根高低不齐的琴键剪影(模板图,深浅色自动反白)。以前是文字「UF8」。
+  鼠标悬停会显示当前「输入 → 输出 [协议]」。
+- App 图标:深色圆角底 + 白键键盘 + 橙色走带箭头(和菜单栏图标同一套视觉)。
+  源码在 tools/makeicons.m,可重新生成:clang ... && tools/makeicons /tmp/iconwork,
+  再用 iconutil 打包成 resources/AppIcon.icns。
 
 【0.1.7 修了什么】(一次独立代码审计后修的一批问题)
 - 菜单勾选态显示错:App 启动时菜单先建、配置后恢复,导致「用 Mackie Control 发 transport」

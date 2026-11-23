@@ -68,7 +68,17 @@
 
 - (void)setupStatusBar {
     _statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:NSVariableStatusItemLength];
-    _statusItem.button.title = @"UF8";
+    // 菜单栏图标:模板图(纯黑剪影),系统会按深浅色自动反色。找不到资源时退回文字
+    NSImage *barIcon = [NSImage imageNamed:@"menubar"];
+    if (barIcon) {
+        barIcon.template = YES;
+        barIcon.size = NSMakeSize(18, 18);
+        _statusItem.button.image = barIcon;
+        _statusItem.button.imagePosition = NSImageOnly;
+        _statusItem.button.toolTip = @"cme-uf8-router";
+    } else {
+        _statusItem.button.title = @"UF8";
+    }
     _statusItem.button.target = self;
     _statusItem.button.action = @selector(statusClicked:);
 
@@ -168,7 +178,12 @@
         default: proto = @"自动"; break;
     }
     _statusItem_row.title = [NSString stringWithFormat:@"● %@ → %@ [%@]", src, dst, proto];
-    _statusItem.button.title = [NSString stringWithFormat:@"UF8:%@", src.length > 6 ? [src substringToIndex:6] : src];
+    if (!_statusItem.button.image) {
+        _statusItem.button.title = [NSString stringWithFormat:@"UF8:%@", src.length > 6 ? [src substringToIndex:6] : src];
+    } else {
+        // 有图标时详情放 tooltip,菜单栏保持干净
+        _statusItem.button.toolTip = [NSString stringWithFormat:@"%@ → %@ [%@]", src, dst, proto];
+    }
 }
 
 // ---------- 输入源子菜单 ----------
@@ -469,6 +484,14 @@ static int validateMenu(NSMenu *menu, NSString *prefix) {
         printf("FAIL 找不到 Mackie Control 菜单项\n");
         fails++;
     }
+
+    // 4.5) 图标资源是否随包带上(打包漏拷时菜单栏会退回文字)
+    NSImage *barIcon = [NSImage imageNamed:@"menubar"];
+    BOOL iconOK = (barIcon != nil && barIcon.template && barIcon.size.width >= 16);
+    printf("%s 菜单栏图标资源(menubar.png,模板图)\n", iconOK ? "ok  " : "FAIL");
+    if (!iconOK) fails++;
+    NSImage *appIcon = [NSImage imageNamed:NSImageNameApplicationIcon];
+    printf("info 应用图标: %s\n", appIcon ? "已载入(Info.plist CFBundleIconFile)" : "未载入(非致命)");
 
     // 5) 退出项可用性(不真退出)
     NSMenuItem *quit = nil;

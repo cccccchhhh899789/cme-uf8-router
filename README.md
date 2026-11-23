@@ -54,6 +54,19 @@ DAW 侧（以 Logic Pro 为例）：
 | 控制表面设定 → 安装 → **Mackie Control** | 输入 + 输出都选 `CME UF8 Router MCU` |
 | 设置 → MIDI → 输入 | **取消勾选** `CME UF8 Router MCU`（否则乐器轨会跟着弹响，见下） |
 
+## 图标
+
+菜单栏图标是模板图（`resources/menubar.png`，系统按深浅色自动反色），App 图标是 `resources/AppIcon.icns`。
+两者都由 `tools/makeicons.m` 生成（纯 AppKit 绘制，无外部依赖）：
+
+```bash
+clang -fobjc-arc -framework Cocoa -o tools/makeicons tools/makeicons.m
+tools/makeicons /tmp/iconwork                       # 生成 iconset + 菜单栏 png
+iconutil -c icns /tmp/iconwork/AppIcon.iconset -o resources/AppIcon.icns
+```
+
+（`iconutil` 要写临时文件，在外接 exFAT 盘上直接跑会失败，所以先生成到 /tmp 再拷回。）
+
 ## 自检
 
 ```bash

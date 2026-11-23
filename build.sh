@@ -48,6 +48,12 @@ echo "==> ad-hoc 签名(arm64 必须,否则 M 芯片拒绝运行)"
 codesign --force -s - "$MACOS/cme-uf8-router" 2>&1
 codesign -dv "$MACOS/cme-uf8-router" 2>&1 | head -3
 
+echo "==> 拷贝图标资源"
+mkdir -p "$CONTENTS/Resources"
+cp resources/AppIcon.icns "$CONTENTS/Resources/AppIcon.icns"
+cp resources/menubar.png "$CONTENTS/Resources/menubar.png"
+cp resources/menubar@2x.png "$CONTENTS/Resources/menubar@2x.png"
+
 echo "==> 写 Info.plist"
 cat > "$CONTENTS/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -62,8 +68,10 @@ cat > "$CONTENTS/Info.plist" <<'PLIST'
     <string>cme-uf8-router</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.7</string>
+    <string>0.1.8</string>
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>LSMinimumSystemVersion</key>
@@ -73,7 +81,7 @@ cat > "$CONTENTS/Info.plist" <<'PLIST'
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSHumanReadableCopyright</key>
-    <string>cme-uf8-router 0.1.7</string>
+    <string>cme-uf8-router 0.1.8</string>
 </dict>
 </plist>
 PLIST
