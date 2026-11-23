@@ -39,7 +39,7 @@ static void DrawKeyboard(CGFloat w, CGFloat h, BOOL darkKeys) {
     }
 }
 
-// 应用图标:深色圆角方块 + 键盘 + 橙色走带箭头
+// 应用图标:深色圆角方块 + 键盘 + 橙色走带箭头(旧版,留作备选)
 static void DrawAppIcon(CGFloat s) {
     NSRect full = NSMakeRect(0, 0, s, s);
     // 背景(略带内缩,给图标一点呼吸感)
@@ -67,6 +67,30 @@ static void DrawAppIcon(CGFloat s) {
     [head lineToPoint:NSMakePoint(s * 0.60, y - s * 0.050)];
     [head closePath];
     [head fill];
+}
+
+// 应用图标(0.1.9 起):深色圆角底 + CME 原厂字标(白字 + 橙点,取自 cme-pro.com)+ UF8 字样
+static void DrawAppIconCME(CGFloat s, NSImage *wordmark) {
+    NSRect bg = NSInsetRect(NSMakeRect(0, 0, s, s), s * 0.055, s * 0.055);
+    NSBezierPath *sq = [NSBezierPath bezierPathWithRoundedRect:bg xRadius:s * 0.225 yRadius:s * 0.225];
+    NSGradient *g = [[NSGradient alloc] initWithStartingColor:HexRGB(0x2E2E38)
+                                                  endingColor:HexRGB(0x14141A)];
+    [g drawInBezierPath:sq angle:-90];
+
+    // 只取 CME 三个字母,丢掉下面那行 slogan —— 16pt 下它就是一团噪点
+    CGFloat srcW = 600, srcH = 215, cropH = 150;          // 原图 600x215,字母占上部
+    NSRect from = NSMakeRect(0, srcH - cropH, srcW, cropH); // 原点在左下,取上部
+    CGFloat wmW = s * 0.66;
+    CGFloat wmH = wmW * (cropH / srcW);
+    NSRect wmRect = NSMakeRect((s - wmW) / 2.0, s * 0.44, wmW, wmH);
+    [wordmark drawInRect:wmRect fromRect:from operation:NSCompositingOperationSourceOver fraction:1.0];
+
+    // 下面一行 UF8,弱化处理,只作型号识别
+    NSDictionary *attrs = @{ NSFontAttributeName: [NSFont systemFontOfSize:s * 0.085 weight:NSFontWeightMedium],
+                             NSForegroundColorAttributeName: HexRGB(0x9A9AA6) };
+    NSString *model = @"UF8";
+    NSSize sz = [model sizeWithAttributes:attrs];
+    [model drawAtPoint:NSMakePoint((s - sz.width) / 2.0, s * 0.30) withAttributes:attrs];
 }
 
 // 菜单栏图标:纯黑剪影(alpha 决定形状),系统会按深浅色自动反色
@@ -111,9 +135,12 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
     [[NSFileManager defaultManager] createDirectoryAtPath:outDir withIntermediateDirectories:YES attributes:nil error:NULL];
 
     // ---- 应用图标:1024 设计稿 -> 各尺寸 ----
+    NSString *wmPath = [outDir stringByAppendingPathComponent:@"cme-wordmark.png"];
+    NSImage *wordmark = [[NSImage alloc] initWithContentsOfFile:wmPath];
+    if (!wordmark) { printf("缺 cme-wordmark.png(放在 %s 下)\n", outDir.UTF8String); wordmark = nil; }
     NSImage *appIcon = [[NSImage alloc] initWithSize:NSMakeSize(1024, 1024)];
     [appIcon lockFocus];
-    DrawAppIcon(1024);
+    if (wordmark) DrawAppIconCME(1024, wordmark); else DrawAppIcon(1024);
     [appIcon unlockFocus];
 
     NSString *iconset = [outDir stringByAppendingPathComponent:@"AppIcon.iconset"];
